@@ -44,3 +44,7 @@ Desktop.ini
 
 # Misc
 *.log
+
+# Generated experiment outputs
+results/*
+!results/
