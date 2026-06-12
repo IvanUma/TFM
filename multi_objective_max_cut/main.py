@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import functools
 import json
-import multiprocessing
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import List
+from multiprocessing.pool import ThreadPool
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -18,10 +18,10 @@ from qiskit_aer import AerSimulator
 
 matplotlib.use("Agg")
 
-if not hasattr(creator, "BasicFitnessMax"):
-    creator.create("BasicFitnessMax", base.Fitness, weights=(1.0,))
-if not hasattr(creator, "BasicIndividual"):
-    creator.create("BasicIndividual", list, fitness=creator.BasicFitnessMax)
+if not hasattr(creator, "MultiFitness"):
+    creator.create("MultiFitness", base.Fitness, weights=(-1.0, -1.0))
+if not hasattr(creator, "MultiIndividual"):
+    creator.create("MultiIndividual", list, fitness=creator.MultiFitness)
 
 toolbox: base.Toolbox = base.Toolbox()
 
@@ -30,7 +30,7 @@ def main() -> None:
     project_root = Path(__file__).parent.parent
 
     sys.path.insert(0, str(project_root))
-    from basic_max_cut.utils import (
+    from multi_objective_max_cut.utils import (
         EvolutionaryIndividual,
         build_quantum_circuit,
         cx_quantum_circuit,
@@ -42,9 +42,9 @@ def main() -> None:
         mut_quantum_circuit,
     )
 
-    instance_name = input("Indica el nombre del fichero de instancia: ").strip()
+    instance_name = input("Enter the instance filename: ").strip()
     if not instance_name:
-        print("[ERROR] No se indicó ningún fichero.")
+        print("[ERROR] No file was specified.")
         return
 
     instance_path = Path(instance_name)
@@ -54,7 +54,7 @@ def main() -> None:
     file_path = str(instance_path)
 
     if not Path(file_path).exists():
-        print(f"[ERROR] No se encuentra el archivo: {file_path}")
+        print(f"[ERROR] File not found: {file_path}")
         return
 
     graph: nx.Graph
@@ -85,9 +85,10 @@ def main() -> None:
         graph_instance=graph,
         indpb=0.2,
     )
-    toolbox.register("select", tools.selTournament, tournsize=3)
 
-    pool = multiprocessing.Pool()
+    toolbox.register("select", tools.selNSGA2)
+
+    pool = ThreadPool()
     toolbox.register("map", pool.map)
 
     print(f"Loaded External Instance: {file_path}")
@@ -101,39 +102,51 @@ def main() -> None:
     population: List[EvolutionaryIndividual] = []
 
     for _ in range(num_heuristic):
-        population.append(creator.BasicIndividual(toolbox.individual_heuristic()))
+        population.append(creator.MultiIndividual(toolbox.individual_heuristic()))
     for _ in range(num_random):
-        population.append(creator.BasicIndividual(toolbox.individual()))
+        population.append(creator.MultiIndividual(toolbox.individual()))
 
     crossover_prob = 0.5
     mutation_prob = 0.4
     generations = 150
+    initial_cvar_gamma = 0.7
+    final_cvar_gamma = 0.1
 
-    stats_fit = tools.Statistics(key=lambda ind: ind.fitness.values[0])
-    stats_depth = tools.Statistics(
-        key=lambda ind: build_quantum_circuit(ind, num_qubits).depth()
-    )
-    statistics = tools.MultiStatistics(fitness=stats_fit, depth=stats_depth)
+    stats_cut = tools.Statistics(key=lambda ind: ind.fitness.values[0])
+    stats_depth = tools.Statistics(key=lambda ind: ind.fitness.values[1])
+    statistics = tools.MultiStatistics(cut=stats_cut, depth=stats_depth)
     statistics.register("min", np.min)
-    statistics.register("max", np.max)
     statistics.register("mean", np.mean)
 
-    hof = tools.HallOfFame(1)
     logbook = tools.Logbook()
-    logbook.header = ["gen", "best_depth"] + ["min", "max", "mean"]
+    logbook.header = ["gen", "shots", "gamma", "best_cvar_cut", "best_depth"]
 
     print(
-        "Starting evolutionary quantum architecture search (Parallelized Mu + Lambda)...\n"
+        "Starting Multi-Objective Evolutionary QAS "
+        "(NSGA-II + Dynamic Shots + Dynamic Gamma)...\n"
     )
 
     for gen in range(generations):
+        schedule_progress = gen / (generations - 1) if generations > 1 else 1.0
+        current_shots = int(200 + (2800 * schedule_progress))
+        current_gamma = max(
+            final_cvar_gamma,
+            initial_cvar_gamma
+            - ((initial_cvar_gamma - final_cvar_gamma) * schedule_progress),
+        )
+
+        for ind in population:
+            if hasattr(ind, "fitness"):
+                del ind.fitness.values
+
         toolbox.register(
             "evaluate",
             functools.partial(
                 evaluate_circuit,
                 graph_instance=graph,
                 num_qubits=num_qubits,
-                current_generation=gen,
+                shots=current_shots,
+                gamma=current_gamma,
             ),
         )
 
@@ -146,55 +159,81 @@ def main() -> None:
             mutpb=mutation_prob,
             ngen=1,
             stats=None,
-            halloffame=hof,
+            halloffame=None,
             verbose=False,
         )
 
         record = statistics.compile(population)
 
-        best_in_gen = tools.selBest(population, 1)[0]
-        current_best_depth = build_quantum_circuit(best_in_gen, num_qubits).depth()
+        best_cvar_in_gen = -record["cut"]["min"]
+        best_depth_in_gen = record["depth"]["min"]
 
-        logbook.record(gen=gen, best_depth=current_best_depth, **record)
+        logbook.record(
+            gen=gen,
+            shots=current_shots,
+            gamma=current_gamma,
+            best_cvar_cut=best_cvar_in_gen,
+            best_depth=best_depth_in_gen,
+            **record,
+        )
         print(
-            f"Gen {gen}: Max Fitness = {record['fitness']['max']:.4f} | Depth of Best = {current_best_depth}"
+            f"Gen {gen} ({current_shots} shots, gamma={current_gamma:.3f}): "
+            f"Max CVaR Cut = {best_cvar_in_gen:.2f} | "
+            f"Min Depth = {best_depth_in_gen:.1f}"
         )
 
     pool.close()
     pool.join()
 
-    best_individual: EvolutionaryIndividual = hof[0]
+    pareto_front = tools.sortNondominated(
+        population, len(population), first_front_only=True
+    )[0]
 
-    qc_draw_copy = build_quantum_circuit(best_individual, num_qubits)
-    qc_final = build_quantum_circuit(best_individual, num_qubits, measure=True)
     sim = AerSimulator()
-    final_counts = sim.run(qc_final, shots=3000).result().get_counts()
-    best_quantum_cut = max_cut_fitness(final_counts, 3000, graph)
+    best_individual = None
+    best_quantum_cut = -1.0
+
+    print("\nEvaluating final Pareto Front on full classical expectation...")
+    for ind in pareto_front:
+        qc_eval = build_quantum_circuit(ind, num_qubits, measure=True)
+        counts = sim.run(qc_eval, shots=3000).result().get_counts()
+        real_cut = -max_cut_fitness(counts, 3000, graph)
+        if real_cut > best_quantum_cut:
+            best_quantum_cut = real_cut
+            best_individual = ind
+
     approximation_ratio = best_quantum_cut / optimal_classical_cut
 
     instance_name = Path(file_path).name
-    algorithm_name = "basic"
+    algorithm_name = "multiobjective"
     timestamp = datetime.now().strftime("%d%m%Y_%H%M%S")
     output_dir = project_root / "results" / instance_name / algorithm_name
     output_dir.mkdir(parents=True, exist_ok=True)
     output_stem = f"{instance_name}_q{num_qubits}_g{generations}_{timestamp}"
 
-    print("\n=================== FINAL QUANTUM CIRCUIT ===================")
+    qc_draw_copy = build_quantum_circuit(best_individual, num_qubits)
+    qc_final = build_quantum_circuit(best_individual, num_qubits, measure=True)
+
+    print(
+        "\n=================== FINAL QUANTUM CIRCUIT (PARETO BEST) ==================="
+    )
     qc_draw_copy.draw(output="mpl", filename=str(output_dir / f"{output_stem}.pdf"))
     with open(output_dir / f"{output_stem}.qpy", "wb") as f:
         qpy.dump(qc_final, f)
-    print("=============================================================")
-    print("\n=================== FINAL BENCHMARK ===================")
+    print("===========================================================================")
+
+    print("\n=================== FINAL BENCHMARK (UPGRADED) ===================")
     print(f"Target Benchmark Instance: {file_path}")
     print(f"Exact Classical Maximum Cut: {optimal_classical_cut}")
     print(f"Best Quantum Expected Cut Found: {best_quantum_cut:.4f}")
     print(f"Final Approximation Ratio (Alpha): {approximation_ratio:.4f}")
     print(f"Physical Circuit Depth of Best: {qc_draw_copy.depth()}")
-    print("=======================================================")
+    print(f"Total Genes/Gates in Structure: {len(best_individual)}")
+    print("==================================================================")
 
     generations_axis = logbook.select("gen")
-    best_fitness = logbook.chapters["fitness"].select("max")
-    best_depth_history = logbook.select("best_depth")
+    history_cvar = logbook.select("best_cvar_cut")
+    history_depth = logbook.select("best_depth")
 
     output_data = {
         "config": {
@@ -203,56 +242,63 @@ def main() -> None:
             "generations": generations,
             "mu": mu,
             "lambda": lambda_,
+            "initial_cvar_gamma": initial_cvar_gamma,
+            "final_cvar_gamma": final_cvar_gamma,
         },
         "results": {
             "exact_classical_cut": int(optimal_classical_cut),
             "best_quantum_cut": float(best_quantum_cut),
             "approximation_ratio": float(approximation_ratio),
             "best_individual_depth": int(qc_draw_copy.depth()),
+            "best_individual_gate_count": len(best_individual),
         },
         "history": {
             "generation": [int(g) for g in generations_axis],
-            "best_fitness": [float(f) for f in best_fitness],
-            "best_depth": [int(d) for d in best_depth_history],
+            "best_cvar_cut": [float(c) for c in history_cvar],
+            "best_physical_depth": [float(d) for d in history_depth],
+            "shots_per_generation": [int(s) for s in logbook.select("shots")],
+            "gamma_per_generation": [float(g) for g in logbook.select("gamma")],
         },
+        "final_pareto_front": [
+            {
+                "cvar_cost_obj": float(ind.fitness.values[0]),
+                "depth_obj": float(ind.fitness.values[1]),
+            }
+            for ind in pareto_front
+        ],
     }
 
     with open(output_dir / f"{output_stem}.json", "w") as f:
         json.dump(output_data, f, indent=4)
     print(
-        f"[SERVER INFO] Datos del logbook guardados con éxito en '{output_dir / f'{output_stem}.json'}'"
+        f"\n[SERVER INFO] Logbook data saved to '{output_dir / f'{output_stem}.json'}'"
     )
 
     fig, ax1 = plt.subplots(figsize=(10, 6))
     color = "tab:blue"
-    ax1.set_xlabel("Generación")
-    ax1.set_ylabel("Mejor Fitness (Maximización)", color=color)
-    ax1.plot(
-        generations_axis, best_fitness, color=color, linewidth=2, label="Mejor Fitness"
-    )
+    ax1.set_xlabel("Generation")
+    ax1.set_ylabel("Best CVaR Cut Detected (Maximization)", color=color)
+    ax1.plot(generations_axis, history_cvar, color=color, linewidth=2, label="CVaR Cut")
     ax1.tick_params(axis="y", labelcolor=color)
     ax1.grid(True, linestyle="--", alpha=0.5)
 
     ax2 = ax1.twinx()
     color = "tab:orange"
-    ax2.set_ylabel("Profundidad del Mejor Circuito", color=color)
+    ax2.set_ylabel("Minimum Physical Circuit Depth", color=color)
     ax2.plot(
         generations_axis,
-        best_depth_history,
+        history_depth,
         color=color,
         linestyle="--",
         linewidth=2,
-        label="Profundidad del Mejor",
+        label="Minimum Depth",
     )
     ax2.tick_params(axis="y", labelcolor=color)
-    plt.title(
-        "Dinámica Evolutiva: Optimización de Fitness vs. Profundidad del Mejor Circuito"
-    )
+
+    plt.title("NSGA-II Evolution: CVaR MaxCut Optimization vs. Circuit Depth")
     fig.tight_layout()
     plt.savefig(output_dir / f"{output_stem}.png", dpi=300)
-    print(
-        f"[SERVER INFO] Gráfica de control guardada con éxito en '{output_dir / f'{output_stem}.png'}'"
-    )
+    print(f"[SERVER INFO] Control plot saved to '{output_dir / f'{output_stem}.png'}'")
 
 
 if __name__ == "__main__":
