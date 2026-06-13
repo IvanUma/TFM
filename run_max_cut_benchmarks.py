@@ -35,13 +35,16 @@ def main() -> None:
     for name in ALGORITHMS:
         print(f" - {name}")
 
-    selected_algorithms = (
-        input("\nAlgorithms to run (comma separated): ").strip().split(",")
-    )
+    selected_algorithms = input(
+        "\nAlgorithms to run (comma separated, default: both): "
+    ).strip()
 
-    selected_algorithms = [
-        alg.strip() for alg in selected_algorithms if alg.strip() in ALGORITHMS
-    ]
+    if not selected_algorithms:
+        selected_algorithms = list(ALGORITHMS)
+    else:
+        selected_algorithms = [
+            alg.strip() for alg in selected_algorithms.split(",") if alg.strip() in ALGORITHMS
+        ]
 
     instances_dir = PROJECT_ROOT / "max_cut_instances"
 
