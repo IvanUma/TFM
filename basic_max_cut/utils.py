@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import heapq
 from functools import lru_cache
 from typing import Dict, Tuple
 
@@ -18,6 +19,40 @@ mut_quantum_circuit = common.mut_quantum_circuit
 simplify_circuit = common.simplify_circuit
 
 SIMULATOR = AerSimulator()
+STATE_CACHE: Dict[tuple, float] = {}
+
+
+def cut_value_for_state(state: str, edges_tuple: tuple) -> float:
+    key = (state, edges_tuple)
+    value = STATE_CACHE.get(key)
+    if value is not None:
+        return value
+    corrected_state = state[::-1]
+    value = sum(
+        weight
+        for u, v, weight in edges_tuple
+        if corrected_state[u] != corrected_state[v]
+    )
+    STATE_CACHE[key] = value
+    return value
+
+
+def cvar_from_counts(counts: Dict[str, int], edges_tuple: tuple, gamma: float) -> float:
+    cutoff = max(1, int(sum(counts.values()) * gamma))
+    scored = [
+        (cut_value_for_state(state, edges_tuple), count)
+        for state, count in counts.items()
+    ]
+    best_states = heapq.nlargest(len(scored), scored, key=lambda x: x[0])
+    remaining = cutoff
+    total = 0.0
+    for cut_value, count in best_states:
+        selected = min(count, remaining)
+        total += cut_value * selected
+        remaining -= selected
+        if remaining == 0:
+            break
+    return total / cutoff
 
 
 def max_cut_fitness(
@@ -39,29 +74,28 @@ def max_cut_fitness(
 
 @lru_cache(maxsize=10000)
 def _eval_cached(
-    individual_tuple: tuple, edges_tuple: tuple, num_qubits: int, shots: int
+    individual_tuple: tuple,
+    edges_tuple: tuple,
+    num_qubits: int,
+    shots: int,
+    gamma: float,
 ) -> float:
     individual = list(individual_tuple)
-    graph = nx.Graph()
-    graph.add_weighted_edges_from(edges_tuple)
-
     qc = build_quantum_circuit(individual, num_qubits, measure=True)
     result = SIMULATOR.run(qc, shots=shots).result()
     counts = result.get_counts()
-
-    return max_cut_fitness(counts, shots, graph)
+    return cvar_from_counts(counts, edges_tuple, gamma)
 
 
 def evaluate_circuit(
     individual: EvolutionaryIndividual,
     graph_instance: nx.Graph,
     num_qubits: int,
-    current_generation: int = 1000,
+    shots: int,
+    gamma: float,
 ) -> Tuple[float]:
     simplified = simplify_circuit(individual, num_qubits)
     individual[:] = simplified
-
-    shots = 1000 if current_generation < 50 else 3000
 
     edges_tuple = tuple(
         sorted(
@@ -69,7 +103,7 @@ def evaluate_circuit(
             for u, v in graph_instance.edges()
         )
     )
-    raw_fitness = _eval_cached(tuple(individual), edges_tuple, num_qubits, shots)
+    raw_fitness = _eval_cached(tuple(individual), edges_tuple, num_qubits, shots, gamma)
 
     qc_physical = build_quantum_circuit(individual, num_qubits, measure=False)
     current_depth = qc_physical.depth()
@@ -80,7 +114,7 @@ def evaluate_circuit(
         else 1
     )
 
-    max_depth_threshold = max(15, max_degree * 3 * 2)
+    max_depth_threshold = max(15, max_degree * 6)
 
     penalty = (
         0.02 * ((current_depth - max_depth_threshold) ** 2)

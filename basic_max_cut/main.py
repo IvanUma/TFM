@@ -109,6 +109,9 @@ def main() -> None:
     mutation_prob = 0.4
     generations = 150
 
+    initial_gamma = 0.7
+    final_gamma = 0.1
+
     stats_fit = tools.Statistics(key=lambda ind: ind.fitness.values[0])
     stats_depth = tools.Statistics(
         key=lambda ind: build_quantum_circuit(ind, num_qubits).depth()
@@ -120,20 +123,27 @@ def main() -> None:
 
     hof = tools.HallOfFame(1)
     logbook = tools.Logbook()
-    logbook.header = ["gen", "best_depth"] + ["min", "max", "mean"]
+    logbook.header = ["gen", "shots", "gamma", "best_depth"] + ["min", "max", "mean"]
 
     print(
         "Starting evolutionary quantum architecture search (Parallelized Mu + Lambda)...\n"
     )
 
     for gen in range(generations):
+        progress = gen / (generations - 1) if generations > 1 else 1.0
+        current_shots = int(200 + 2800 * progress)
+        current_gamma = max(
+            final_gamma, initial_gamma - (initial_gamma - final_gamma) * progress
+        )
+
         toolbox.register(
             "evaluate",
             functools.partial(
                 evaluate_circuit,
                 graph_instance=graph,
                 num_qubits=num_qubits,
-                current_generation=gen,
+                shots=current_shots,
+                gamma=current_gamma,
             ),
         )
 
@@ -155,9 +165,15 @@ def main() -> None:
         best_in_gen = tools.selBest(population, 1)[0]
         current_best_depth = build_quantum_circuit(best_in_gen, num_qubits).depth()
 
-        logbook.record(gen=gen, best_depth=current_best_depth, **record)
+        logbook.record(
+            gen=gen,
+            shots=current_shots,
+            gamma=current_gamma,
+            best_depth=current_best_depth,
+            **record,
+        )
         print(
-            f"Gen {gen}: Max Fitness = {record['fitness']['max']:.4f} | Depth of Best = {current_best_depth}"
+            f"Gen {gen}: Max Fitness (CVaR) = {record['fitness']['max']:.4f} | Shots = {current_shots} | Depth = {current_best_depth}"
         )
 
     pool.close()
@@ -226,7 +242,7 @@ def main() -> None:
     fig, ax1 = plt.subplots(figsize=(10, 6))
     color = "tab:blue"
     ax1.set_xlabel("Generación")
-    ax1.set_ylabel("Mejor Fitness (Maximización)", color=color)
+    ax1.set_ylabel("Mejor Fitness (CVaR)", color=color)
     ax1.plot(
         generations_axis, best_fitness, color=color, linewidth=2, label="Mejor Fitness"
     )
@@ -246,7 +262,7 @@ def main() -> None:
     )
     ax2.tick_params(axis="y", labelcolor=color)
     plt.title(
-        "Dinámica Evolutiva: Optimización de Fitness vs. Profundidad del Mejor Circuito"
+        "Dinámica Evolutiva: Optimización de CVaR vs. Profundidad del Mejor Circuito"
     )
     fig.tight_layout()
     plt.savefig(output_dir / f"{output_stem}.png", dpi=300)

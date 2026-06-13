@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import heapq
 import threading
 from typing import Dict, Tuple
 
@@ -17,65 +18,118 @@ load_external_maxcut_instance = common.load_external_maxcut_instance
 mut_quantum_circuit = common.mut_quantum_circuit
 simplify_circuit = common.simplify_circuit
 
-CIRCUIT_CACHE: Dict[tuple, dict] = {}
-CACHE_LOCK = threading.Lock()
-HIT_THRESHOLD = 5
 THREAD_LOCAL = threading.local()
+
+CIRCUIT_CACHE: Dict[tuple, dict] = {}
+STATE_CACHE: Dict[tuple, float] = {}
+CACHE_LOCK = threading.Lock()
+
+HIT_THRESHOLD = 5
 
 
 def get_simulator() -> AerSimulator:
     simulator = getattr(THREAD_LOCAL, "simulator", None)
+
     if simulator is None:
         simulator = AerSimulator()
         THREAD_LOCAL.simulator = simulator
+
     return simulator
 
 
-def cut_value_for_state(state: str, edges_tuple: tuple) -> float:
+def cut_value_for_state(
+    state: str,
+    edges_tuple: tuple,
+) -> float:
+
+    key = (state, edges_tuple)
+
+    value = STATE_CACHE.get(key)
+
+    if value is not None:
+        return value
+
     corrected_state = state[::-1]
-    return sum(
+
+    value = sum(
         weight
         for u, v, weight in edges_tuple
         if corrected_state[u] != corrected_state[v]
     )
 
+    STATE_CACHE[key] = value
 
-def cvar_from_counts(counts: Dict[str, int], edges_tuple: tuple, gamma: float) -> float:
-    cutoff = max(1, int(sum(counts.values()) * gamma))
-    remaining = cutoff
-    weighted_total = 0.0
+    return value
 
-    scored_counts = sorted(
-        (
-            (cut_value_for_state(state, edges_tuple), count)
-            for state, count in counts.items()
-        ),
-        reverse=True,
+
+def cvar_from_counts(
+    counts: Dict[str, int],
+    edges_tuple: tuple,
+    gamma: float,
+) -> float:
+
+    cutoff = max(
+        1,
+        int(sum(counts.values()) * gamma),
     )
 
-    for cut_value, count in scored_counts:
-        selected = min(count, remaining)
-        weighted_total += cut_value * selected
+    scored = [
+        (
+            cut_value_for_state(state, edges_tuple),
+            count,
+        )
+        for state, count in counts.items()
+    ]
+
+    best_states = heapq.nlargest(
+        len(scored),
+        scored,
+        key=lambda x: x[0],
+    )
+
+    remaining = cutoff
+    total = 0.0
+
+    for cut_value, count in best_states:
+        selected = min(
+            count,
+            remaining,
+        )
+
+        total += cut_value * selected
+
         remaining -= selected
+
         if remaining == 0:
             break
 
-    return weighted_total / cutoff
+    return total / cutoff
 
 
 def max_cut_fitness(
-    counts: Dict[str, int], simulation_shots: int, graph_instance: nx.Graph
+    counts: Dict[str, int],
+    simulation_shots: int,
+    graph_instance: nx.Graph,
 ) -> float:
+
     expected_cut_value = 0.0
+
     for state, count in counts.items():
-        probability: float = count / simulation_shots
+        probability = count / simulation_shots
+
         cut_edges = 0.0
-        corrected_state: str = state[::-1]
+
+        corrected_state = state[::-1]
+
         for u, v, data in graph_instance.edges(data=True):
-            weight = data.get("weight", 1.0)
             if corrected_state[u] != corrected_state[v]:
-                cut_edges += weight
+                cut_edges += data.get(
+                    "weight",
+                    1.0,
+                )
+
         expected_cut_value += cut_edges * probability
+
     return -expected_cut_value
 
 
@@ -86,71 +140,111 @@ def evaluate_circuit(
     shots: int,
     gamma: float = 0.1,
 ) -> Tuple[float, float]:
-    simplified = simplify_circuit(individual, num_qubits)
+
+    simplified = simplify_circuit(
+        individual,
+        num_qubits,
+    )
+
     individual[:] = simplified
 
     edges_tuple = tuple(
         sorted(
-            (u, v, graph_instance[u][v].get("weight", 1.0))
+            (
+                u,
+                v,
+                graph_instance[u][v].get(
+                    "weight",
+                    1.0,
+                ),
+            )
             for u, v in graph_instance.edges()
         )
     )
 
-    ind_key = (num_qubits, tuple(individual))
-
-    with CACHE_LOCK:
-        cached_data = CIRCUIT_CACHE.get(ind_key)
-
-    if cached_data is not None:
-        with CACHE_LOCK:
-            cached_data["hits"] += 1
-            current_hits = cached_data["hits"]
-            cached_shots = cached_data["simulator_shots"]
-
-        if current_hits >= HIT_THRESHOLD and shots > cached_shots:
-            qc_meas = build_quantum_circuit(individual, num_qubits, measure=True)
-            qc_phys = build_quantum_circuit(individual, num_qubits, measure=False)
-
-            counts = get_simulator().run(qc_meas, shots=shots).result().get_counts()
-            circuit_depth = float(qc_phys.depth())
-
-            with CACHE_LOCK:
-                cached_data["counts"] = counts
-                cached_data["depth"] = circuit_depth
-                cached_data["simulator_shots"] = shots
-        else:
-            counts = cached_data["counts"]
-            circuit_depth = cached_data["depth"]
-    else:
-        qc_meas = build_quantum_circuit(individual, num_qubits, measure=True)
-        qc_phys = build_quantum_circuit(individual, num_qubits, measure=False)
-
-        counts = get_simulator().run(qc_meas, shots=shots).result().get_counts()
-        circuit_depth = float(qc_phys.depth())
-
-        with CACHE_LOCK:
-            CIRCUIT_CACHE[ind_key] = {
-                "counts": counts,
-                "depth": circuit_depth,
-                "hits": 0,
-                "simulator_shots": shots,
-            }
-
-    cvar_cut = cvar_from_counts(counts, edges_tuple, gamma)
-
-    max_degree = (
-        max(dict(graph_instance.degree()).values())
-        if graph_instance.number_of_nodes() > 0
-        else 1
+    ind_key = (
+        num_qubits,
+        tuple(individual),
     )
 
-    max_depth_threshold = max(15, max_degree * 3 * 2)
+    with CACHE_LOCK:
+        cached = CIRCUIT_CACHE.get(ind_key)
 
-    if circuit_depth > max_depth_threshold:
-        penalized_depth = circuit_depth + 2.0 * (
-            (circuit_depth - max_depth_threshold) ** 2
+    if cached is None:
+        qc_phys = build_quantum_circuit(
+            individual,
+            num_qubits,
         )
-    else:
-        penalized_depth = circuit_depth
 
-    return (-cvar_cut, penalized_depth)
+        qc_meas = qc_phys.copy()
+        qc_meas.measure_all()
+
+        depth = float(qc_phys.depth())
+
+        counts = (
+            get_simulator()
+            .run(
+                qc_meas,
+                shots=shots,
+            )
+            .result()
+            .get_counts()
+        )
+
+        cached = {
+            "qc_phys": qc_phys,
+            "qc_meas": qc_meas,
+            "depth": depth,
+            "counts": counts,
+            "shots": shots,
+            "hits": 0,
+        }
+
+        with CACHE_LOCK:
+            CIRCUIT_CACHE[ind_key] = cached
+
+    else:
+        cached["hits"] += 1
+
+        if cached["hits"] >= HIT_THRESHOLD and shots > cached["shots"]:
+            counts = (
+                get_simulator()
+                .run(
+                    cached["qc_meas"],
+                    shots=shots,
+                )
+                .result()
+                .get_counts()
+            )
+
+            cached["counts"] = counts
+            cached["shots"] = shots
+
+    counts = cached["counts"]
+    depth = cached["depth"]
+
+    cvar_cut = cvar_from_counts(
+        counts,
+        edges_tuple,
+        gamma,
+    )
+
+    max_degree = max(
+        dict(graph_instance.degree()).values(),
+        default=1,
+    )
+
+    threshold = max(
+        15,
+        max_degree * 6,
+    )
+
+    if depth > threshold:
+        penalized_depth = depth + 2.0 * (depth - threshold) ** 2
+    else:
+        penalized_depth = depth
+
+    return (
+        -cvar_cut,
+        penalized_depth,
+    )
