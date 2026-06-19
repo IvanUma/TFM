@@ -5,6 +5,11 @@ from typing import List, Tuple, Union
 
 import networkx as nx
 from qiskit import QuantumCircuit
+from qiskit.transpiler import PassManager
+from qiskit.transpiler.passes import (
+    CommutativeCancellation,
+    Optimize1qGatesSimpleCommutation,
+)
 
 QuantumGen = Union[Tuple[str, int], Tuple[str, int, int]]
 EvolutionaryIndividual = List[QuantumGen]
@@ -127,44 +132,46 @@ def mut_quantum_circuit(
 def simplify_circuit(
     individual: EvolutionaryIndividual, num_qubits: int
 ) -> EvolutionaryIndividual:
-    """Simplifica el circuito eliminando compuertas que se cancelan de forma continua
-
-    o que conmutan a través de otras compuertas sin interactuar con los mismos qubits.
-    """
     prefix = individual[:num_qubits]
     mutable = list(individual[num_qubits:])
 
-    simplified: EvolutionaryIndividual = []
+    qc = QuantumCircuit(num_qubits)
+    for gen in mutable:
+        gate_type = gen[0]
+        if gate_type == "H":
+            qc.h(gen[1])
+        elif gate_type == "S":
+            qc.s(gen[1])
+        elif gate_type == "CX":
+            qc.cx(gen[1], gen[2])
 
-    for gate in mutable:
-        gate_type = gate[0]
+    pm = PassManager(
+        [
+            CommutativeCancellation(),
+            Optimize1qGatesSimpleCommutation(),
+        ]
+    )
+    qc_optimized = pm.run(qc)
 
-        if gate_type not in ["H", "CX"]:
-            simplified.append(gate)
-            continue
+    optimized_mutable: EvolutionaryIndividual = []
+    for instruction in qc_optimized.data:
+        gate_name = instruction.operation.name.upper()
+        qubits = [qc_optimized.find_bit(q).index for q in instruction.qubits]
 
-        gate_qubits = set(gate[1:])
-        can_cancel = False
+        if gate_name == "H":
+            optimized_mutable.append(("H", qubits[0]))
+        elif gate_name == "S":
+            optimized_mutable.append(("S", qubits[0]))
+        elif gate_name == "CX":
+            optimized_mutable.append(("CX", qubits[0], qubits[1]))
 
-        for j in range(len(simplified) - 1, -1, -1):
-            prev_gate = simplified[j]
-            prev_qubits = set(prev_gate[1:])
-
-            if not gate_qubits.isdisjoint(prev_qubits):
-                if gate == prev_gate:
-                    simplified.pop(j)
-                    can_cancel = True
-                break
-
-        if not can_cancel:
-            simplified.append(gate)
-
-    return prefix + simplified
+    return prefix + optimized_mutable
 
 
 def build_quantum_circuit(
     individual: EvolutionaryIndividual, num_qubits: int, measure: bool = False
 ) -> QuantumCircuit:
+    """Construye un objeto QuantumCircuit de Qiskit a partir del genoma del individuo."""
     qc: QuantumCircuit = QuantumCircuit(num_qubits)
     for gen in individual:
         gate_type: str = gen[0]

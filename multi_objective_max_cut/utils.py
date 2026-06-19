@@ -22,7 +22,6 @@ THREAD_LOCAL = threading.local()
 
 CIRCUIT_CACHE: Dict[tuple, dict] = {}
 STATE_CACHE: Dict[tuple, float] = {}
-CACHE_LOCK = threading.Lock()
 
 HIT_THRESHOLD = 5
 
@@ -128,7 +127,7 @@ def max_cut_fitness(
                     1.0,
                 )
 
-        expected_cut_value += cut_edges * probability
+            expected_cut_value += cut_edges * probability
 
     return -expected_cut_value
 
@@ -167,8 +166,7 @@ def evaluate_circuit(
         tuple(individual),
     )
 
-    with CACHE_LOCK:
-        cached = CIRCUIT_CACHE.get(ind_key)
+    cached = CIRCUIT_CACHE.get(ind_key)
 
     if cached is None:
         qc_phys = build_quantum_circuit(
@@ -200,8 +198,7 @@ def evaluate_circuit(
             "hits": 0,
         }
 
-        with CACHE_LOCK:
-            CIRCUIT_CACHE[ind_key] = cached
+        CIRCUIT_CACHE[ind_key] = cached
 
     else:
         cached["hits"] += 1
