@@ -27,10 +27,10 @@ toolbox: base.Toolbox = base.Toolbox()
 
 
 def main() -> None:
-    project_root = Path(__file__).parent.parent
+    project_root = Path(__file__).resolve().parents[2]
 
     sys.path.insert(0, str(project_root))
-    from basic_max_cut.utils import (
+    from algorithms.basic_max_cut.utils import (
         EvolutionaryIndividual,
         build_quantum_circuit,
         cx_quantum_circuit,

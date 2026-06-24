@@ -5,7 +5,7 @@ from typing import Dict, List, Tuple
 
 import networkx as nx
 
-from qpu_needless_engine import (
+from .qpu_needless_engine import (
     PauliSum,
     PauliTerm,
     evaluate_on_plus_state,

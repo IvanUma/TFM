@@ -40,10 +40,10 @@ def evaluate_circuit_analytically(individual, num_qubits, graph, build_quantum_c
 
 
 def main() -> None:
-    project_root = Path(__file__).parent.parent
+    project_root = Path(__file__).resolve().parents[2]
 
     sys.path.insert(0, str(project_root))
-    from multi_objective_max_cut.utils import (
+    from algorithms.multi_objective_max_cut.max_cut_clifford import (
         EvolutionaryIndividual,
         build_quantum_circuit,
         cx_quantum_circuit,

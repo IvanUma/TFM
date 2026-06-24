@@ -5,8 +5,8 @@ import json
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import List
 from multiprocessing import Pool
+from typing import List
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -26,10 +26,14 @@ toolbox: base.Toolbox = base.Toolbox()
 
 
 def main() -> None:
-    project_root = Path(__file__).parent.parent
+    project_root = Path(__file__).resolve().parents[2]
 
     sys.path.insert(0, str(project_root))
-    from multi_objective_max_cut.utils import (
+
+    from algorithms.multi_objective_max_cut.utils import (
+        APPROACH,
+        CONFIG,
+        CONFIG_PATH,
         EvolutionaryIndividual,
         build_quantum_circuit,
         cx_quantum_circuit,
@@ -56,13 +60,26 @@ def main() -> None:
         print(f"[ERROR] File not found: {file_path}")
         return
 
+    if not CONFIG_PATH.exists():
+        print(f"[ERROR] Config file not found: {CONFIG_PATH}")
+        return
+
+    population_config = CONFIG["population"]
+    variation_config = CONFIG["variation"]
+    evolution_config = CONFIG["evolution"]
+    gamma_config = CONFIG["gamma_schedule"]
+    evaluation_config = CONFIG["evaluation"]
+
     graph, num_qubits, optimal_classical_cut = load_external_maxcut_instance(file_path)
 
     toolbox.register(
         "individual",
         generate_guided_individual,
         num_qubits=num_qubits,
-        length=max(20, num_qubits * 2),
+        length=max(
+            evolution_config["guided_individual_length_min"],
+            num_qubits * evolution_config["guided_individual_length_factor"],
+        ),
         graph_instance=graph,
     )
 
@@ -82,20 +99,21 @@ def main() -> None:
         mut_quantum_circuit,
         num_qubits=num_qubits,
         graph_instance=graph,
-        indpb=0.2,
+        indpb=variation_config["mutation_indpb"],
     )
 
     toolbox.register("select", tools.selNSGA2)
 
-    pool = Pool()
+    pool = Pool(processes=2)
     toolbox.register("map", pool.map)
 
     print(f"Loaded External Instance: {file_path}")
     print(f"Nodes / Qubits detected: {num_qubits}")
+    print(f"Algorithm Strategy: {APPROACH.upper()}")
     print(f"Target Optimal Classical MaxCut: {optimal_classical_cut} cuts\n")
 
-    mu = 150
-    lambda_ = 200
+    mu = population_config["mu"]
+    lambda_ = population_config["lambda"]
 
     population: List[EvolutionaryIndividual] = []
 
@@ -105,12 +123,12 @@ def main() -> None:
     for _ in range(mu - len(population)):
         population.append(creator.MultiIndividual(toolbox.individual()))
 
-    crossover_prob = 0.5
-    mutation_prob = 0.4
-    generations = 150
+    crossover_prob = variation_config["crossover_prob"]
+    mutation_prob = variation_config["mutation_prob"]
+    generations = evolution_config["generations"]
 
-    initial_gamma = 0.7
-    final_gamma = 0.1
+    initial_gamma = gamma_config["initial"]
+    final_gamma = gamma_config["final"]
 
     logbook = tools.Logbook()
     logbook.header = [
@@ -131,7 +149,11 @@ def main() -> None:
     for gen in range(generations):
         progress = gen / (generations - 1)
 
-        current_shots = int(200 + 2800 * progress)
+        current_shots = int(
+            evaluation_config["shots_start"]
+            + (evaluation_config["shots_end"] - evaluation_config["shots_start"])
+            * progress
+        )
 
         current_gamma = max(
             final_gamma,
@@ -213,7 +235,7 @@ def main() -> None:
         counts = (
             simulator.run(
                 qc,
-                shots=3000,
+                shots=evaluation_config["final_validation_shots"],
             )
             .result()
             .get_counts()
@@ -221,7 +243,7 @@ def main() -> None:
 
         cut = -max_cut_fitness(
             counts,
-            3000,
+            evaluation_config["final_validation_shots"],
             graph,
         )
 
@@ -233,11 +255,15 @@ def main() -> None:
 
     timestamp = datetime.now().strftime("%d%m%Y_%H%M%S")
 
-    output_dir = project_root / "results" / Path(file_path).name / "multiobjective"
+    output_dir = (
+        project_root / "results" / Path(file_path).name / "multiobjective" / APPROACH
+    )
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    output_stem = f"{Path(file_path).name}_q{num_qubits}_g{generations}_{timestamp}"
+    output_stem = (
+        f"{Path(file_path).name}_{APPROACH}_q{num_qubits}_g{generations}_{timestamp}"
+    )
 
     qc_draw = build_quantum_circuit(best_individual, num_qubits)
 
@@ -261,11 +287,18 @@ def main() -> None:
 
     output_data = {
         "config": {
+            "approach": APPROACH,
+            "config_file": str(CONFIG_PATH),
             "instance_file": file_path,
             "num_qubits": num_qubits,
             "generations": generations,
             "mu": mu,
             "lambda": lambda_,
+            "population": population_config,
+            "variation": variation_config,
+            "evolution": evolution_config,
+            "gamma_schedule": gamma_config,
+            "evaluation": evaluation_config,
         },
         "results": {
             "exact_classical_cut": int(optimal_classical_cut),
@@ -280,7 +313,7 @@ def main() -> None:
         },
     }
 
-    with open(output_dir / f"{output_stem}.json", "w") as f:
+    with open(output_dir / f"{output_stem}.json", "w", encoding="utf-8") as f:
         json.dump(output_data, f, indent=4)
 
     print(
@@ -315,7 +348,7 @@ def main() -> None:
     )
     ax2.tick_params(axis="y", labelcolor=color)
 
-    plt.title("Evolutionary Dynamics: CVaR Optimization vs. Circuit Depth")
+    plt.title(f"Evolutionary Dynamics ({APPROACH.upper()}): CVaR vs Depth")
 
     fig.tight_layout()
 

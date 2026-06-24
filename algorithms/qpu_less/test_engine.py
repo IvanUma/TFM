@@ -1,6 +1,7 @@
 import networkx as nx
 import numpy as np
-from utils import compute_qaoa_energy_analytically
+
+from .utils import compute_qaoa_energy_analytically
 
 
 def run_sanity_check():

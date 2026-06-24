@@ -1,5 +1,6 @@
 import math
-from pauli_algebra import PauliTerm, PauliSum, commutator, multiply_terms, simplify_sum
+
+from .pauli_algebra import PauliTerm, PauliSum, commutator, multiply_terms, simplify_sum
 
 
 # Lemma 3.2
