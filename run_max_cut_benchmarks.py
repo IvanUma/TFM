@@ -6,17 +6,20 @@ import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent
-MULTIOBJECTIVE_CONFIG = PROJECT_ROOT / "algorithms" / "multi_objective_max_cut" / "config.json"
+MULTIOBJECTIVE_CONFIG = (
+    PROJECT_ROOT / "algorithms" / "multi_objective_max_cut" / "config.json"
+)
 
 ALGORITHMS = {
-    "basic": PROJECT_ROOT / "algorithms" / "basic_max_cut" / "main.py",
     "qpu_less": PROJECT_ROOT / "algorithms" / "qpu_less" / "main.py",
-    "multiobjective": PROJECT_ROOT / "algorithms" / "multi_objective_max_cut" / "main.py",
+    "multiobjective": PROJECT_ROOT
+    / "algorithms"
+    / "multi_objective_max_cut"
+    / "main.py",
 }
 
 MULTIOBJECTIVE_VARIANTS = {
     "multiobjective_clifford": "clifford",
-    "multiobjective_parametric": "parametric",
 }
 
 
