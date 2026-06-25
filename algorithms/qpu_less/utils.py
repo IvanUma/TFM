@@ -1,86 +1,169 @@
 from __future__ import annotations
 
-import threading
-from typing import Dict, List, Tuple
+import random
+from typing import List, Tuple, Union
 
 import networkx as nx
 
-from .qpu_needless_engine import (
-    PauliSum,
-    PauliTerm,
-    evaluate_on_plus_state,
-    evolve_sum_under_mixer,
-    evolve_sum_under_problem_edge,
-    simplify_sum,
-)
+QuantumGen = Union[Tuple[str, int], Tuple[str, int, int]]
+EvolutionaryIndividual = List[QuantumGen]
 
-ANALYTICAL_CACHE: Dict[Tuple[float, ...], float] = {}
-CACHE_LOCK = threading.Lock()
+CLIFFORD_GATES: List[str] = ["H", "S", "CX"]
 
 
-def compute_qaoa_energy_analytically(
+def load_external_maxcut_instance(file_path: str) -> Tuple[nx.Graph, int, int]:
+    graph_instance = nx.Graph()
+
+    with open(file_path, "r") as f:
+        header = f.readline().split()
+        num_nodes = int(header[0])
+        optimal_cut = int(header[2]) if len(header) > 2 else 0
+
+        graph_instance.add_nodes_from(range(num_nodes))
+
+        for line in f:
+            if line.strip():
+                parts = list(map(float, line.split()))
+                weight = parts[2] if len(parts) > 2 else 1
+                graph_instance.add_edge(
+                    int(parts[0]) - 1,
+                    int(parts[1]) - 1,
+                    weight=weight,
+                )
+
+    return graph_instance, num_nodes, optimal_cut
+
+
+def generate_random_gate(num_qubits: int, graph_instance: nx.Graph) -> QuantumGen:
+    gate = random.choice(CLIFFORD_GATES)
+
+    if gate == "CX" and graph_instance.number_of_edges() > 0:
+        chosen_edge = random.choice(list(graph_instance.edges()))
+        if random.random() > 0.5:
+            return ("CX", chosen_edge[0], chosen_edge[1])
+        return ("CX", chosen_edge[1], chosen_edge[0])
+
+    qubit = random.randint(0, num_qubits - 1)
+    if gate == "S":
+        return ("S", qubit)
+    return ("H", qubit)
+
+
+def generate_guided_individual(
+    num_qubits: int,
+    length: int,
     graph_instance: nx.Graph,
-    gammas: List[float],
-    betas: List[float],
-) -> float:
+) -> EvolutionaryIndividual:
+    individual: EvolutionaryIndividual = [("H", qubit) for qubit in range(num_qubits)]
 
-    # 1. Construimos el Hamiltoniano del problema H_P para MaxCut: 0.5 * W * (I - Z_u Z_v)
-    H_P = PauliSum()
-    for u, v, data in graph_instance.edges(data=True):
-        weight = data.get("weight", 1.0)
-        H_P.append(PauliTerm(0.5 * weight, {}))
-        H_P.append(PauliTerm(-0.5 * weight, {u: "Z", v: "Z"}))
+    for _ in range(length):
+        individual.append(generate_random_gate(num_qubits, graph_instance))
 
-    current_operators = simplify_sum(H_P)
-
-    for layer in range(len(gammas) - 1, -1, -1):
-        gamma = gammas[layer]
-        beta = betas[layer]
-
-        current_operators = evolve_sum_under_mixer(current_operators, beta)
-
-        for u, v, data in graph_instance.edges(data=True):
-            weight = data.get("weight", 1.0)
-            current_operators = evolve_sum_under_problem_edge(
-                current_operators, u, v, gamma, weight
-            )
-
-    return evaluate_on_plus_state(current_operators)
+    return individual
 
 
-def evaluate_analytical_individual(
-    individual: List[float],
+def generate_heuristic_individual(
+    num_qubits: int,
     graph_instance: nx.Graph,
-) -> Tuple[float, float]:
+) -> EvolutionaryIndividual:
+    individual: EvolutionaryIndividual = [("H", qubit) for qubit in range(num_qubits)]
 
-    p = len(individual) // 2
-    gammas = individual[:p]
-    betas = individual[p:]
+    if graph_instance.number_of_nodes() == 0:
+        return individual
 
-    ind_key = tuple(individual)
+    added_edges = set()
+    start_node = random.choice(list(graph_instance.nodes()))
 
-    with CACHE_LOCK:
-        expected_cut = ANALYTICAL_CACHE.get(ind_key)
+    for u, v in nx.dfs_edges(graph_instance, source=start_node):
+        individual.append(("CX", u, v))
+        added_edges.add(tuple(sorted((u, v))))
 
-    if expected_cut is None:
-        expected_cut = compute_qaoa_energy_analytically(graph_instance, gammas, betas)
+    for u, v in graph_instance.edges():
+        edge = tuple(sorted((u, v)))
+        if edge not in added_edges:
+            individual.append(("CX", u, v))
+            added_edges.add(edge)
 
-        with CACHE_LOCK:
-            ANALYTICAL_CACHE[ind_key] = expected_cut
+    for _ in range(num_qubits // 2 + 1):
+        individual.append(("S", random.randint(0, num_qubits - 1)))
 
-    max_degree = max(dict(graph_instance.degree()).values(), default=1)
+    return individual
 
-    theoretical_layer_depth = max_degree + 1
-    depth = float(1 + p * theoretical_layer_depth)
 
-    threshold = max(15, max_degree * 6)
+def cx_quantum_circuit(
+    ind1: EvolutionaryIndividual,
+    ind2: EvolutionaryIndividual,
+    num_qubits: int,
+) -> Tuple[EvolutionaryIndividual, EvolutionaryIndividual]:
+    size = min(len(ind1), len(ind2)) - num_qubits
+    if size < 2:
+        return ind1, ind2
 
-    if depth > threshold:
-        penalized_depth = depth + 2.0 * (depth - threshold) ** 2
+    cxpoint1 = random.randint(1, size)
+    cxpoint2 = random.randint(1, size - 1)
+    if cxpoint2 >= cxpoint1:
+        cxpoint2 += 1
     else:
-        penalized_depth = depth
+        cxpoint1, cxpoint2 = cxpoint2, cxpoint1
 
-    return (
-        -expected_cut,
-        penalized_depth,
+    cxpoint1 += num_qubits
+    cxpoint2 += num_qubits
+    ind1[cxpoint1:cxpoint2], ind2[cxpoint1:cxpoint2] = (
+        ind2[cxpoint1:cxpoint2],
+        ind1[cxpoint1:cxpoint2],
     )
+
+    return ind1, ind2
+
+
+def mut_quantum_circuit(
+    individual: EvolutionaryIndividual,
+    num_qubits: int,
+    graph_instance: nx.Graph,
+    indpb: float,
+) -> Tuple[EvolutionaryIndividual,]:
+    index = num_qubits
+
+    while index < len(individual):
+        if random.random() < indpb:
+            action = random.choice(["INSERT", "DELETE", "REPLACE"])
+
+            if action == "DELETE" and len(individual) > num_qubits + 1:
+                individual.pop(index)
+                continue
+
+            if action == "REPLACE":
+                individual[index] = generate_random_gate(num_qubits, graph_instance)
+
+            if action == "INSERT":
+                individual.insert(index, generate_random_gate(num_qubits, graph_instance))
+                index += 1
+
+        index += 1
+
+    return (individual,)
+
+
+def simplify_circuit(
+    individual: EvolutionaryIndividual,
+    num_qubits: int,
+) -> EvolutionaryIndividual:
+    _ = num_qubits
+    simplified: EvolutionaryIndividual = []
+
+    for gate in individual:
+        if simplified and gate == simplified[-1] and gate[0] in {"H", "CX"}:
+            simplified.pop()
+            continue
+        simplified.append(gate)
+
+        if len(simplified) >= 4:
+            last_four = simplified[-4:]
+            if all(item == gate for item in last_four) and gate[0] == "S":
+                del simplified[-4:]
+
+    return simplified
+
+
+def get_cache_key(num_qubits: int, individual: EvolutionaryIndividual) -> tuple:
+    return (num_qubits, tuple(individual))

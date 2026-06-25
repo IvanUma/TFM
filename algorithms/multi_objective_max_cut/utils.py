@@ -60,7 +60,10 @@ def get_simulator() -> AerSimulator:
     simulator = getattr(THREAD_LOCAL, "simulator", None)
 
     if simulator is None:
-        simulator = AerSimulator(method="matrix_product_state")
+        if APPROACH == "clifford":
+            simulator = AerSimulator(method="stabilizer")
+        else:
+            simulator = AerSimulator(method="matrix_product_state")
         THREAD_LOCAL.simulator = simulator
 
     return simulator

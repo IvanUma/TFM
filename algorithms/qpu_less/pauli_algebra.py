@@ -91,3 +91,29 @@ def simplify_sum(p_sum: PauliSum) -> PauliSum:
             new_terms.append(PauliTerm(coeff, ops))
 
     return PauliSum(new_terms)
+
+
+def evaluate_on_plus_state(p_sum: PauliSum) -> float:
+    expectation = 0.0 + 0j
+
+    for term in p_sum.terms:
+        if all(op == "X" for op in term.operators.values()):
+            expectation += term.coefficient
+
+    if abs(expectation.imag) > 1e-8:
+        raise ValueError(f"Expected real expectation value, got {expectation}")
+
+    return float(expectation.real)
+
+
+def evaluate_on_zero_state(p_sum: PauliSum) -> float:
+    expectation = 0.0 + 0j
+
+    for term in p_sum.terms:
+        if all(op == "Z" for op in term.operators.values()):
+            expectation += term.coefficient
+
+    if abs(expectation.imag) > 1e-8:
+        raise ValueError(f"Expected real expectation value, got {expectation}")
+
+    return float(expectation.real)
