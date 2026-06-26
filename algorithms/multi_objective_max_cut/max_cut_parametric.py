@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import random
-import operator
 from typing import List, Tuple, Union
 
-import numpy as np
 import networkx as nx
 from qiskit import QuantumCircuit
 from qiskit.transpiler import PassManager
@@ -12,43 +10,18 @@ from qiskit.transpiler.passes import (
     CommutativeCancellation,
     Optimize1qGatesSimpleCommutation,
 )
-from deap import gp
-import functools
 
 import max_cut_common as common
-
-pset = gp.PrimitiveSet("MAIN", 1)
-pset.renameArguments(ARG0="theta")
-
-pset.addPrimitive(operator.add, 2)
-pset.addPrimitive(operator.sub, 2)
-pset.addPrimitive(operator.mul, 2)
-
-
-def safe_mod(a, b):
-    return a % b if abs(b) > 0.001 else a
-
-
-pset.addPrimitive(safe_mod, 2)
-
-pset.addPrimitive(np.sin, 1)
-pset.addPrimitive(np.cos, 1)
-
-
-def generate_rand_const():
-    return random.randint(-3, 3)
-
-
-pset.addEphemeralConstant("rand_const", generate_rand_const)
 
 QuantumGen = Union[
     Tuple[str, int],
     Tuple[str, int, int],
-    Tuple[str, int, List[tuple], gp.PrimitiveTree],
+    Tuple[str, int, str, int],
 ]
 EvolutionaryIndividual = List[QuantumGen]
 
 CLIFFORD_GATES: List[str] = ["H", "S", "CX"]
+PARAMETRIC_GATES: List[str] = ["RX", "RY", "RZ"]
 
 load_external_maxcut_instance = common.load_external_maxcut_instance
 
@@ -71,14 +44,9 @@ def generate_random_gate(num_qubits: int, graph_instance: nx.Graph) -> QuantumGe
 def generate_random_param_block(
     num_qubits: int, graph_instance: nx.Graph, param_idx: int
 ) -> QuantumGen:
-    block_gates = []
-    for _ in range(random.randint(1, 3)):
-        block_gates.append(generate_random_gate(num_qubits, graph_instance))
-
-    expr = gp.genFull(pset, min_=1, max_=3)
-    tree = gp.PrimitiveTree(expr)
-
-    return ("PARAM_BLOCK", param_idx, block_gates, tree)
+    gate = random.choice(PARAMETRIC_GATES)
+    q = random.randint(0, num_qubits - 1)
+    return ("PARAM_BLOCK", param_idx, gate, q)
 
 
 def generate_guided_individual(
@@ -87,7 +55,6 @@ def generate_guided_individual(
     graph_instance: nx.Graph,
 ) -> EvolutionaryIndividual:
     individual: EvolutionaryIndividual = [("H", q) for q in range(num_qubits)]
-
     max_params = 3
 
     for _ in range(length):
@@ -167,20 +134,13 @@ def mut_quantum_circuit(
 
         if gen[0] == "PARAM_BLOCK":
             if random.random() < indpb:
-                param_idx, block_gates, tree = gen[1], gen[2], gen[3]
-
-                mutated_tree = gp.mutUniform(
-                    tree,
-                    expr=functools.partial(gp.genFull, min_=1, max_=2),
-                    pset=pset,
-                )[0]
-
-                individual[i] = (
-                    "PARAM_BLOCK",
-                    param_idx,
-                    block_gates,
-                    gp.PrimitiveTree(mutated_tree),
-                )
+                param_idx = gen[1]
+                if random.random() < 0.5:
+                    new_gate = random.choice(PARAMETRIC_GATES)
+                    individual[i] = ("PARAM_BLOCK", param_idx, new_gate, gen[3])
+                else:
+                    new_q = random.randint(0, num_qubits - 1)
+                    individual[i] = ("PARAM_BLOCK", param_idx, gen[2], new_q)
                 i += 1
                 continue
 
@@ -266,28 +226,22 @@ def build_quantum_circuit(
     for gen in individual:
         gate_type: str = gen[0]
         if gate_type == "PARAM_BLOCK":
-            param_idx, block_gates, tree = gen[1], gen[2], gen[3]
+            param_idx, rot_gate, qubit = gen[1], gen[2], gen[3]
 
             if theta_values is None:
-                num_repetitions = 1
+                theta = 0.0
             else:
-                func = gp.compile(tree, pset)
                 try:
-                    theta_val = theta_values[param_idx]
-                    raw_output = func(theta_val)
-                    num_repetitions = int(abs(np.floor(raw_output))) % 5
+                    theta = theta_values[param_idx]
                 except Exception:
-                    num_repetitions = 0
+                    theta = 0.0
 
-            for _ in range(num_repetitions):
-                for b_gate in block_gates:
-                    bg_type = b_gate[0]
-                    if bg_type == "H":
-                        qc.h(b_gate[1])
-                    elif bg_type == "S":
-                        qc.s(b_gate[1])
-                    elif bg_type == "CX":
-                        qc.cx(b_gate[1], b_gate[2])
+            if rot_gate == "RX":
+                qc.rx(theta, qubit)
+            elif rot_gate == "RY":
+                qc.ry(theta, qubit)
+            elif rot_gate == "RZ":
+                qc.rz(theta, qubit)
         else:
             if gate_type == "H":
                 qc.h(gen[1])
@@ -304,7 +258,7 @@ def get_cache_key(num_qubits: int, individual: EvolutionaryIndividual) -> tuple:
     hashable_ind = []
     for gen in individual:
         if gen[0] == "PARAM_BLOCK":
-            hashable_ind.append(("PARAM_BLOCK", gen[1], tuple(gen[2]), str(gen[3])))
+            hashable_ind.append(("PARAM_BLOCK", gen[1], gen[2], gen[3]))
         else:
             hashable_ind.append(gen)
     return (num_qubits, tuple(hashable_ind))

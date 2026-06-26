@@ -170,50 +170,90 @@ def evaluate_circuit(
         )
     )
 
-    ind_key = get_cache_key(num_qubits, individual)
-    cached = CIRCUIT_CACHE.get(ind_key)
+    has_param_blocks = any(gen[0] == "PARAM_BLOCK" for gen in individual)
 
-    if cached is None:
-        qc_phys = build_quantum_circuit(
-            individual,
-            num_qubits,
-        )
-        qc_meas = qc_phys.copy()
-        qc_meas.measure_all()
-        depth = float(qc_phys.depth())
-        counts = get_simulator().run(qc_meas, shots=shots).result().get_counts()
+    if not has_param_blocks:
+        ind_key = get_cache_key(num_qubits, individual)
+        cached = CIRCUIT_CACHE.get(ind_key)
 
-        cached = {
-            "qc_phys": qc_phys,
-            "qc_meas": qc_meas,
-            "depth": depth,
-            "counts": counts,
-            "shots": shots,
-            "hits": 0,
-        }
-        CIRCUIT_CACHE[ind_key] = cached
-    else:
-        cached["hits"] += 1
-        if cached["hits"] >= HIT_THRESHOLD and shots > cached["shots"]:
-            counts = (
-                get_simulator()
-                .run(
-                    cached["qc_meas"],
-                    shots=shots,
-                )
-                .result()
-                .get_counts()
+        if cached is None:
+            qc_phys = build_quantum_circuit(
+                individual,
+                num_qubits,
             )
-            cached["counts"] = counts
-            cached["shots"] = shots
+            qc_meas = qc_phys.copy()
+            qc_meas.measure_all()
+            depth = float(qc_phys.depth())
+            counts = get_simulator().run(qc_meas, shots=shots).result().get_counts()
 
-    counts = cached["counts"]
-    depth = cached["depth"]
-    cvar_cut = cvar_from_counts(
-        counts,
-        edges_tuple,
-        gamma,
-    )
+            cached = {
+                "qc_phys": qc_phys,
+                "qc_meas": qc_meas,
+                "depth": depth,
+                "counts": counts,
+                "shots": shots,
+                "hits": 0,
+            }
+            CIRCUIT_CACHE[ind_key] = cached
+        else:
+            cached["hits"] += 1
+            if cached["hits"] >= HIT_THRESHOLD and shots > cached["shots"]:
+                counts = (
+                    get_simulator()
+                    .run(
+                        cached["qc_meas"],
+                        shots=shots,
+                    )
+                    .result()
+                    .get_counts()
+                )
+                cached["counts"] = counts
+                cached["shots"] = shots
+
+        counts = cached["counts"]
+        depth = cached["depth"]
+        cvar_cut = cvar_from_counts(
+            counts,
+            edges_tuple,
+            gamma,
+        )
+    else:
+        from scipy.optimize import minimize
+        import numpy as np
+
+        active_indices = sorted(
+            list(set(gen[1] for gen in individual if gen[0] == "PARAM_BLOCK"))
+        )
+        num_params = len(active_indices)
+
+        def cobyla_objective(theta_vector):
+            theta_values = [0.0] * (max(active_indices) + 1) if active_indices else []
+            for i, idx in enumerate(active_indices):
+                theta_values[idx] = theta_vector[i]
+
+            qc_meas = build_quantum_circuit(
+                individual, num_qubits, theta_values=theta_values, measure=True
+            )
+            counts = get_simulator().run(qc_meas, shots=shots).result().get_counts()
+
+            return -cvar_from_counts(counts, edges_tuple, gamma)
+
+        initial_guess = np.random.uniform(0, 2 * np.pi, num_params)
+
+        res = minimize(
+            cobyla_objective, x0=initial_guess, method="COBYLA", options={"maxiter": 20}
+        )
+
+        cvar_cut = -res.fun
+
+        theta_values_opt = [0.0] * (max(active_indices) + 1) if active_indices else []
+        for i, idx in enumerate(active_indices):
+            theta_values_opt[idx] = res.x[i]
+
+        qc_phys = build_quantum_circuit(
+            individual, num_qubits, theta_values=theta_values_opt
+        )
+        depth = float(qc_phys.depth())
 
     max_degree = max(
         dict(graph_instance.degree()).values(),
