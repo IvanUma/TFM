@@ -202,7 +202,6 @@ def main() -> None:
     statistics.register("min", np.min)
     statistics.register("mean", np.mean)
 
-    # AquÃ­ inyectamos nuestro motor
     toolbox.register(
         "evaluate",
         functools.partial(

@@ -5,7 +5,7 @@ import heapq
 import json
 import threading
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Tuple, List
 
 import networkx as nx
 from qiskit_aer import AerSimulator
@@ -145,7 +145,7 @@ def max_cut_fitness(
 
 def evaluate_circuit(
     individual: EvolutionaryIndividual,
-    graph_instance: nx.Graph,
+    graphs_data: List[Tuple[nx.Graph, int]],
     num_qubits: int,
     shots: int,
     gamma: float = 0.1,
@@ -156,23 +156,10 @@ def evaluate_circuit(
     )
     individual[:] = simplified
 
-    edges_tuple = tuple(
-        sorted(
-            (
-                u,
-                v,
-                graph_instance[u][v].get(
-                    "weight",
-                    1.0,
-                ),
-            )
-            for u, v in graph_instance.edges()
-        )
-    )
-
     has_param_blocks = any(gen[0] == "PARAM_BLOCK" for gen in individual)
 
     if not has_param_blocks:
+        individual.stored_thetas = None
         ind_key = get_cache_key(num_qubits, individual)
         cached = CIRCUIT_CACHE.get(ind_key)
 
@@ -212,11 +199,24 @@ def evaluate_circuit(
 
         counts = cached["counts"]
         depth = cached["depth"]
-        cvar_cut = cvar_from_counts(
-            counts,
-            edges_tuple,
-            gamma,
-        )
+
+        total_ar = 0.0
+        for graph_instance, optimal_classical_cut in graphs_data:
+            edges_tuple = tuple(
+                sorted(
+                    (u, v, graph_instance[u][v].get("weight", 1.0))
+                    for u, v in graph_instance.edges()
+                )
+            )
+            cvar_cut = cvar_from_counts(counts, edges_tuple, gamma)
+            ar = cvar_cut / (
+                optimal_classical_cut if optimal_classical_cut > 0 else 1.0
+            )
+            total_ar += ar
+
+        avg_ar = total_ar / len(graphs_data)
+        metric_value = -avg_ar
+
     else:
         from scipy.optimize import minimize
         import numpy as np
@@ -226,39 +226,63 @@ def evaluate_circuit(
         )
         num_params = len(active_indices)
 
-        def cobyla_objective(theta_vector):
-            theta_values = [0.0] * (max(active_indices) + 1) if active_indices else []
-            for i, idx in enumerate(active_indices):
-                theta_values[idx] = theta_vector[i]
+        total_ar = 0.0
+        individual.stored_thetas = {}
 
-            qc_meas = build_quantum_circuit(
-                individual, num_qubits, theta_values=theta_values, measure=True
+        for g_idx, (graph_instance, optimal_classical_cut) in enumerate(graphs_data):
+            edges_tuple = tuple(
+                sorted(
+                    (u, v, graph_instance[u][v].get("weight", 1.0))
+                    for u, v in graph_instance.edges()
+                )
             )
-            counts = get_simulator().run(qc_meas, shots=shots).result().get_counts()
 
-            return -cvar_from_counts(counts, edges_tuple, gamma)
+            def cobyla_objective(theta_vector):
+                theta_values = (
+                    [0.0] * (max(active_indices) + 1) if active_indices else []
+                )
+                for i, idx in enumerate(active_indices):
+                    theta_values[idx] = theta_vector[i]
 
-        initial_guess = np.random.uniform(0, 2 * np.pi, num_params)
+                qc_meas = build_quantum_circuit(
+                    individual, num_qubits, theta_values=theta_values, measure=True
+                )
+                counts = get_simulator().run(qc_meas, shots=shots).result().get_counts()
 
-        res = minimize(
-            cobyla_objective, x0=initial_guess, method="COBYLA", options={"maxiter": 20}
-        )
+                return -cvar_from_counts(counts, edges_tuple, gamma)
 
-        cvar_cut = -res.fun
+            initial_guess = np.random.uniform(0, 2 * np.pi, num_params)
 
-        theta_values_opt = [0.0] * (max(active_indices) + 1) if active_indices else []
-        for i, idx in enumerate(active_indices):
-            theta_values_opt[idx] = res.x[i]
+            res = minimize(
+                cobyla_objective,
+                x0=initial_guess,
+                method="COBYLA",
+                options={"maxiter": 20},
+            )
+
+            cvar_cut = -res.fun
+            ar = cvar_cut / (
+                optimal_classical_cut if optimal_classical_cut > 0 else 1.0
+            )
+            total_ar += ar
+
+            theta_values_opt = (
+                [0.0] * (max(active_indices) + 1) if active_indices else []
+            )
+            for i, idx in enumerate(active_indices):
+                theta_values_opt[idx] = res.x[i]
+
+            individual.stored_thetas[g_idx] = theta_values_opt
+
+        avg_ar = total_ar / len(graphs_data)
+        metric_value = -avg_ar
 
         qc_phys = build_quantum_circuit(
             individual, num_qubits, theta_values=theta_values_opt
         )
         depth = float(qc_phys.depth())
 
-    max_degree = max(
-        dict(graph_instance.degree()).values(),
-        default=1,
-    )
+    max_degree = max(max(dict(g[0].degree()).values(), default=1) for g in graphs_data)
     threshold = max(
         15,
         max_degree * 6,
@@ -270,6 +294,6 @@ def evaluate_circuit(
         penalized_depth = depth
 
     return (
-        -cvar_cut,
+        metric_value,
         penalized_depth,
     )

@@ -56,7 +56,6 @@ if __name__ == "__main__":
     instances_dir = Path(__file__).parent / "max_cut_instances"
 
     qubit_groups = [
-        (6, 0.5),
         (10, 0.4),
         (14, 0.3),
         (20, 0.3),
