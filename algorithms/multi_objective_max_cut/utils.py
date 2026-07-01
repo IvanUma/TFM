@@ -1,299 +1,106 @@
 from __future__ import annotations
 
 import importlib
-import heapq
 import json
-import threading
+import logging
 from pathlib import Path
-from typing import Dict, Tuple, List
+from typing import List, Tuple
 
 import networkx as nx
+import numpy as np
 from qiskit_aer import AerSimulator
+from scipy.optimize import minimize
+
+from . import max_cut_common as common
+
+logger = logging.getLogger(__name__)
 
 CONFIG_PATH = Path(__file__).with_name("config.json")
-
-if not CONFIG_PATH.exists():
-    raise FileNotFoundError(f"Config file not found: {CONFIG_PATH}")
-
 with open(CONFIG_PATH, "r", encoding="utf-8") as f:
     CONFIG = json.load(f)
 
-APPROACH = CONFIG.get("approach", "clifford").lower()
+APPROACH: str = CONFIG["approach"]
 
-if APPROACH == "parametric":
-    q_strategy = importlib.import_module(
-        "algorithms.multi_objective_max_cut.max_cut_parametric"
-    )
-elif APPROACH == "clifford":
-    q_strategy = importlib.import_module(
-        "algorithms.multi_objective_max_cut.max_cut_clifford"
-    )
-else:
-    raise ValueError(
-        f"Unsupported multiobjective approach: {APPROACH!r}. "
-        "Expected 'clifford' or 'parametric'."
-    )
+_encoding_cfg = CONFIG.get("encoding", {})
+MAX_PARAMS: int = _encoding_cfg.get("max_params", 3)
+ENABLE_INPUT_PARAMS: bool = _encoding_cfg.get("enable_input_params", False)
+PARAM_BLOCK_PROB: float = _encoding_cfg.get("param_block_prob", 0.15)
+
+q_strategy = importlib.import_module(f".max_cut_{APPROACH}", package=__package__)
 
 EvolutionaryIndividual = q_strategy.EvolutionaryIndividual
+
 build_quantum_circuit = q_strategy.build_quantum_circuit
-cx_quantum_circuit = q_strategy.cx_quantum_circuit
+get_param_indices = q_strategy.get_param_indices
 generate_guided_individual = q_strategy.generate_guided_individual
-generate_heuristic_individual = q_strategy.generate_heuristic_individual
-load_external_maxcut_instance = q_strategy.load_external_maxcut_instance
 mut_quantum_circuit = q_strategy.mut_quantum_circuit
-simplify_circuit = q_strategy.simplify_circuit
-get_cache_key = getattr(
-    q_strategy,
-    "get_cache_key",
-    lambda num_qubits, individual: (num_qubits, tuple(individual)),
-)
 
-THREAD_LOCAL = threading.local()
+generate_heuristic_individual = common.generate_heuristic_individual
+load_external_maxcut_instance = common.load_external_maxcut_instance
+cx_quantum_circuit = common.cx_quantum_circuit
+max_cut_fitness = common.max_cut_fitness
 
-CIRCUIT_CACHE: Dict[tuple, dict] = {}
-STATE_CACHE: Dict[tuple, float] = {}
-
-HIT_THRESHOLD = 5
+DEFAULT_INPUT_VALUES: List[float] = [0.0]
 
 
-def get_simulator() -> AerSimulator:
-    simulator = getattr(THREAD_LOCAL, "simulator", None)
+def update_hof(individual: q_strategy.EvolutionaryIndividual) -> None:
+    if APPROACH != "clifford":
+        return
 
-    if simulator is None:
-        if APPROACH == "clifford":
-            simulator = AerSimulator(method="stabilizer")
-        else:
-            simulator = AerSimulator(method="matrix_product_state")
-        THREAD_LOCAL.simulator = simulator
+    for gen in individual:
+        if gen[0] == "PARAM_BLOCK":
+            block_gates = gen[2]
+            if block_gates not in q_strategy.BLOCK_HOF:
+                q_strategy.BLOCK_HOF.append(block_gates)
 
-    return simulator
-
-
-def cut_value_for_state(
-    state: str,
-    edges_tuple: tuple,
-) -> float:
-    key = (state, edges_tuple)
-
-    value = STATE_CACHE.get(key)
-    if value is not None:
-        return value
-
-    corrected_state = state[::-1]
-    value = sum(
-        weight
-        for u, v, weight in edges_tuple
-        if corrected_state[u] != corrected_state[v]
-    )
-    STATE_CACHE[key] = value
-    return value
-
-
-def cvar_from_counts(
-    counts: Dict[str, int],
-    edges_tuple: tuple,
-    gamma: float,
-) -> float:
-    cutoff = max(1, int(sum(counts.values()) * gamma))
-    scored = [
-        (
-            cut_value_for_state(state, edges_tuple),
-            count,
-        )
-        for state, count in counts.items()
-    ]
-
-    best_states = heapq.nlargest(
-        len(scored),
-        scored,
-        key=lambda x: x[0],
-    )
-
-    remaining = cutoff
-    total = 0.0
-
-    for cut_value, count in best_states:
-        selected = min(count, remaining)
-        total += cut_value * selected
-        remaining -= selected
-        if remaining == 0:
-            break
-
-    return total / cutoff
-
-
-def max_cut_fitness(
-    counts: Dict[str, int],
-    simulation_shots: int,
-    graph_instance: nx.Graph,
-) -> float:
-    expected_cut_value = 0.0
-
-    for state, count in counts.items():
-        probability = count / simulation_shots
-        cut_edges = 0.0
-        corrected_state = state[::-1]
-
-        for u, v, data in graph_instance.edges(data=True):
-            if corrected_state[u] != corrected_state[v]:
-                cut_edges += data.get("weight", 1.0)
-
-        expected_cut_value += cut_edges * probability
-
-    return -expected_cut_value
+    if len(q_strategy.BLOCK_HOF) > 50:
+        q_strategy.BLOCK_HOF.pop(0)
 
 
 def evaluate_circuit(
     individual: EvolutionaryIndividual,
-    graphs_data: List[Tuple[nx.Graph, int]],
     num_qubits: int,
+    graph_instance: nx.Graph,
+    optimal_classical_cut: float,
     shots: int,
-    gamma: float = 0.1,
-) -> Tuple[float, float]:
-    simplified = simplify_circuit(
-        individual,
-        num_qubits,
-    )
-    individual[:] = simplified
+    gamma: float,
+) -> Tuple[Tuple[float, float], List[float]]:
+    _, weight_indices = get_param_indices(individual)
+    num_weights = max(weight_indices) + 1 if weight_indices else 0
+    input_values = DEFAULT_INPUT_VALUES
 
-    has_param_blocks = any(gen[0] == "PARAM_BLOCK" for gen in individual)
+    simulator = AerSimulator()
 
-    if not has_param_blocks:
-        individual.stored_thetas = None
-        ind_key = get_cache_key(num_qubits, individual)
-        cached = CIRCUIT_CACHE.get(ind_key)
-
-        if cached is None:
-            qc_phys = build_quantum_circuit(
-                individual,
-                num_qubits,
-            )
-            qc_meas = qc_phys.copy()
-            qc_meas.measure_all()
-            depth = float(qc_phys.depth())
-            counts = get_simulator().run(qc_meas, shots=shots).result().get_counts()
-
-            cached = {
-                "qc_phys": qc_phys,
-                "qc_meas": qc_meas,
-                "depth": depth,
-                "counts": counts,
-                "shots": shots,
-                "hits": 0,
-            }
-            CIRCUIT_CACHE[ind_key] = cached
-        else:
-            cached["hits"] += 1
-            if cached["hits"] >= HIT_THRESHOLD and shots > cached["shots"]:
-                counts = (
-                    get_simulator()
-                    .run(
-                        cached["qc_meas"],
-                        shots=shots,
-                    )
-                    .result()
-                    .get_counts()
-                )
-                cached["counts"] = counts
-                cached["shots"] = shots
-
-        counts = cached["counts"]
-        depth = cached["depth"]
-
-        total_ar = 0.0
-        for graph_instance, optimal_classical_cut in graphs_data:
-            edges_tuple = tuple(
-                sorted(
-                    (u, v, graph_instance[u][v].get("weight", 1.0))
-                    for u, v in graph_instance.edges()
-                )
-            )
-            cvar_cut = cvar_from_counts(counts, edges_tuple, gamma)
-            ar = cvar_cut / (
-                optimal_classical_cut if optimal_classical_cut > 0 else 1.0
-            )
-            total_ar += ar
-
-        avg_ar = total_ar / len(graphs_data)
-        metric_value = -avg_ar
-
-    else:
-        from scipy.optimize import minimize
-        import numpy as np
-
-        active_indices = sorted(
-            list(set(gen[1] for gen in individual if gen[0] == "PARAM_BLOCK"))
+    def objective(weight_values) -> float:
+        qc = build_quantum_circuit(
+            individual, num_qubits, input_values, list(weight_values), measure=True
         )
-        num_params = len(active_indices)
+        counts = simulator.run(qc, shots=shots).result().get_counts()
+        cvar_cut = max_cut_fitness(counts, graph_instance, alpha=gamma)
+        return -cvar_cut  # COBYLA minimiza
 
-        total_ar = 0.0
-        individual.stored_thetas = {}
-
-        for g_idx, (graph_instance, optimal_classical_cut) in enumerate(graphs_data):
-            edges_tuple = tuple(
-                sorted(
-                    (u, v, graph_instance[u][v].get("weight", 1.0))
-                    for u, v in graph_instance.edges()
-                )
-            )
-
-            def cobyla_objective(theta_vector):
-                theta_values = (
-                    [0.0] * (max(active_indices) + 1) if active_indices else []
-                )
-                for i, idx in enumerate(active_indices):
-                    theta_values[idx] = theta_vector[i]
-
-                qc_meas = build_quantum_circuit(
-                    individual, num_qubits, theta_values=theta_values, measure=True
-                )
-                counts = get_simulator().run(qc_meas, shots=shots).result().get_counts()
-
-                return -cvar_from_counts(counts, edges_tuple, gamma)
-
-            initial_guess = np.random.uniform(0, 2 * np.pi, num_params)
-
-            res = minimize(
-                cobyla_objective,
-                x0=initial_guess,
-                method="COBYLA",
-                options={"maxiter": 20},
-            )
-
-            cvar_cut = -res.fun
-            ar = cvar_cut / (
-                optimal_classical_cut if optimal_classical_cut > 0 else 1.0
-            )
-            total_ar += ar
-
-            theta_values_opt = (
-                [0.0] * (max(active_indices) + 1) if active_indices else []
-            )
-            for i, idx in enumerate(active_indices):
-                theta_values_opt[idx] = res.x[i]
-
-            individual.stored_thetas[g_idx] = theta_values_opt
-
-        avg_ar = total_ar / len(graphs_data)
-        metric_value = -avg_ar
-
-        qc_phys = build_quantum_circuit(
-            individual, num_qubits, theta_values=theta_values_opt
+    if num_weights > 0:
+        result = minimize(
+            objective,
+            x0=np.random.uniform(0, 2 * np.pi, size=num_weights),
+            method="COBYLA",
+            options={"maxiter": 20},
         )
-        depth = float(qc_phys.depth())
-
-    max_degree = max(max(dict(g[0].degree()).values(), default=1) for g in graphs_data)
-    threshold = max(
-        15,
-        max_degree * 6,
-    )
-
-    if depth > threshold:
-        penalized_depth = depth + 2.0 * (depth - threshold) ** 2
+        best_cut = -result.fun
+        best_weights = [float(w) for w in result.x]
     else:
-        penalized_depth = depth
+        best_cut = -objective([])
+        best_weights = []
 
-    return (
-        metric_value,
-        penalized_depth,
+    approx_ratio = (
+        best_cut / optimal_classical_cut if optimal_classical_cut > 0 else 0.0
     )
+
+    depth = build_quantum_circuit(
+        individual, num_qubits, input_values, best_weights, measure=False
+    ).depth()
+
+    if approx_ratio > 0.8:
+        update_hof(individual)
+
+    return (-approx_ratio, depth), best_weights

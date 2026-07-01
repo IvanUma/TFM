@@ -1,5 +1,5 @@
 {
-    "approach": "clifford",
+    "approach": "parametric",
     "population": {
         "mu": 100,
         "lambda": 40
@@ -22,5 +22,14 @@
         "shots_start": 500,
         "shots_end": 2000,
         "final_validation_shots": 10000
+    },
+    "encoding": {
+        "max_params": 3,
+        "enable_input_params": false,
+        "param_block_prob": 0.15
+    },
+    "execution": {
+        "multiprocessing": true,
+        "processes": 4
     }
 }
