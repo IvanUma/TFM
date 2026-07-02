@@ -22,9 +22,11 @@ with open(CONFIG_PATH, "r", encoding="utf-8") as f:
 APPROACH: str = CONFIG["approach"]
 
 _encoding_cfg = CONFIG.get("encoding", {})
-MAX_PARAMS: int = _encoding_cfg.get("max_params", 3)
 ENABLE_INPUT_PARAMS: bool = _encoding_cfg.get("enable_input_params", False)
 PARAM_BLOCK_PROB: float = _encoding_cfg.get("param_block_prob", 0.15)
+
+_scale_cfg = CONFIG.get("circuit_scale", {})
+MAX_QUBITS = _scale_cfg.get("max_qubits")
 
 q_strategy = importlib.import_module(f".max_cut_{APPROACH}", package=__package__)
 
@@ -39,19 +41,25 @@ generate_heuristic_individual = common.generate_heuristic_individual
 load_external_maxcut_instance = common.load_external_maxcut_instance
 cx_quantum_circuit = common.cx_quantum_circuit
 max_cut_fitness = common.max_cut_fitness
+build_universal_input_values = common.build_universal_input_values
 
-DEFAULT_INPUT_VALUES: List[float] = [0.0]
+_TRAINING_SIMULATOR = None
 
 
-def update_hof(individual: q_strategy.EvolutionaryIndividual) -> None:
+def get_training_simulator() -> AerSimulator:
+    global _TRAINING_SIMULATOR
+    if _TRAINING_SIMULATOR is None:
+        method = "stabilizer" if APPROACH == "clifford" else "statevector"
+        _TRAINING_SIMULATOR = AerSimulator(method=method, max_parallel_threads=1)
+    return _TRAINING_SIMULATOR
+
+
+def update_hof(block_gates: list) -> None:
     if APPROACH != "clifford":
         return
 
-    for gen in individual:
-        if gen[0] == "PARAM_BLOCK":
-            block_gates = gen[2]
-            if block_gates not in q_strategy.BLOCK_HOF:
-                q_strategy.BLOCK_HOF.append(block_gates)
+    if block_gates not in q_strategy.BLOCK_HOF:
+        q_strategy.BLOCK_HOF.append(block_gates)
 
     if len(q_strategy.BLOCK_HOF) > 50:
         q_strategy.BLOCK_HOF.pop(0)
@@ -62,14 +70,14 @@ def evaluate_circuit(
     num_qubits: int,
     graph_instance: nx.Graph,
     optimal_classical_cut: float,
+    input_values: List[float],
     shots: int,
     gamma: float,
-) -> Tuple[Tuple[float, float], List[float]]:
+) -> Tuple[Tuple[float, float], List[float], List[list]]:
     _, weight_indices = get_param_indices(individual)
     num_weights = max(weight_indices) + 1 if weight_indices else 0
-    input_values = DEFAULT_INPUT_VALUES
 
-    simulator = AerSimulator()
+    simulator = get_training_simulator()
 
     def objective(weight_values) -> float:
         qc = build_quantum_circuit(
@@ -77,14 +85,15 @@ def evaluate_circuit(
         )
         counts = simulator.run(qc, shots=shots).result().get_counts()
         cvar_cut = max_cut_fitness(counts, graph_instance, alpha=gamma)
-        return -cvar_cut  # COBYLA minimiza
+        return -cvar_cut
 
     if num_weights > 0:
+        maxiter = max(20, num_weights * 3)
         result = minimize(
             objective,
             x0=np.random.uniform(0, 2 * np.pi, size=num_weights),
             method="COBYLA",
-            options={"maxiter": 20},
+            options={"maxiter": maxiter},
         )
         best_cut = -result.fun
         best_weights = [float(w) for w in result.x]
@@ -100,7 +109,8 @@ def evaluate_circuit(
         individual, num_qubits, input_values, best_weights, measure=False
     ).depth()
 
-    if approx_ratio > 0.8:
-        update_hof(individual)
+    hof_candidates: List[list] = []
+    if approx_ratio > 0.8 and APPROACH == "clifford":
+        hof_candidates = [gen[2] for gen in individual if gen[0] == "PARAM_BLOCK"]
 
-    return (-approx_ratio, depth), best_weights
+    return (-approx_ratio, depth), best_weights, hof_candidates

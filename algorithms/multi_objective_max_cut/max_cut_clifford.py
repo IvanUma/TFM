@@ -3,7 +3,7 @@ from __future__ import annotations
 import functools
 import operator
 import random
-from typing import List, Set, Tuple, Union
+from typing import List, Optional, Set, Tuple, Union
 
 import networkx as nx
 import numpy as np
@@ -49,59 +49,92 @@ CLIFFORD_GATES = ["H", "S", "CX"]
 load_external_maxcut_instance = common.load_external_maxcut_instance
 
 
-def generate_random_gate(num_qubits: int, graph_instance: nx.Graph) -> Tuple:
+def generate_random_gate(
+    num_qubits: int,
+    graph_instance: nx.Graph,
+    max_qubits: Optional[int] = None,
+) -> Tuple:
     gate = random.choice(CLIFFORD_GATES)
-    if gate == "CX" and graph_instance.number_of_edges() > 0:
-        edge = random.choice(list(graph_instance.edges()))
-        return (
-            ("CX", edge[0], edge[1])
-            if random.random() > 0.5
-            else ("CX", edge[1], edge[0])
-        )
+
+    if gate == "CX":
+        if max_qubits:
+            i, j = random.choice(common.enumerate_qubit_pairs(max_qubits))
+            return ("CX", i, j) if random.random() > 0.5 else ("CX", j, i)
+        if graph_instance.number_of_edges() > 0:
+            edge = random.choice(list(graph_instance.edges()))
+            return (
+                ("CX", edge[0], edge[1])
+                if random.random() > 0.5
+                else ("CX", edge[1], edge[0])
+            )
+        gate = random.choice(["H", "S"])
+
     return (gate, random.randint(0, num_qubits - 1))
 
 
-def generate_random_block(num_qubits: int, graph_instance: nx.Graph) -> List[Tuple]:
+def generate_random_block(
+    num_qubits: int,
+    graph_instance: nx.Graph,
+    max_qubits: Optional[int] = None,
+) -> List[Tuple]:
     if len(BLOCK_HOF) > 0 and random.random() < 0.3:
         return list(random.choice(BLOCK_HOF))
 
     length = random.randint(2, 6)
-    block = []
-    for _ in range(length):
-        gate = random.choice(CLIFFORD_GATES)
-        if gate == "CX" and graph_instance.number_of_edges() > 0:
-            u, v = random.choice(list(graph_instance.edges()))
-            block.append(("CX", u, v))
-        else:
-            block.append((gate, random.randint(0, num_qubits - 1)))
-    return block
+    block = [
+        generate_random_gate(num_qubits, graph_instance, max_qubits)
+        for _ in range(length)
+    ]
+    return common.simplify_gate_sequence(block, num_qubits)
 
 
 def generate_random_param_block(
     num_qubits: int,
     graph_instance: nx.Graph,
     param_idx: int,
+    max_qubits: Optional[int] = None,
 ) -> QuantumGen:
-    block_gates = generate_random_block(num_qubits, graph_instance)
+    block_gates = generate_random_block(num_qubits, graph_instance, max_qubits)
+    cx_gates = [g for g in block_gates if g[0] == "CX"]
+    p_idx = param_idx
+
+    if max_qubits and cx_gates and random.random() < 0.8:
+        u, v = cx_gates[0][1], cx_gates[0][2]
+        p_idx = common.pair_index(u, v, max_qubits)
+    elif not max_qubits:
+        edges = list(graph_instance.edges())
+        if edges and cx_gates and random.random() < 0.8:
+            u, v = cx_gates[0][1], cx_gates[0][2]
+            try:
+                p_idx = edges.index((u, v))
+            except ValueError:
+                try:
+                    p_idx = edges.index((v, u))
+                except ValueError:
+                    pass
+
     expr = gp.genHalfAndHalf(pset, min_=1, max_=4)
     tree = gp.PrimitiveTree(expr)
-    return ("PARAM_BLOCK", param_idx, block_gates, tree)
+    return ("PARAM_BLOCK", p_idx, block_gates, tree)
 
 
 def mutate_block_structure(
-    block: List[Tuple], num_qubits: int, graph_instance: nx.Graph
+    block: List[Tuple],
+    num_qubits: int,
+    graph_instance: nx.Graph,
+    max_qubits: Optional[int] = None,
 ) -> List[Tuple]:
     action = random.choice(["INSERT", "DELETE", "REPLACE"])
     if action == "DELETE" and len(block) > 1:
         block.pop(random.randrange(len(block)))
     elif action == "INSERT":
-        new_gate = generate_random_gate(num_qubits, graph_instance)
+        new_gate = generate_random_gate(num_qubits, graph_instance, max_qubits)
         block.insert(random.randint(0, len(block)), new_gate)
     elif action == "REPLACE":
         block[random.randrange(len(block))] = generate_random_gate(
-            num_qubits, graph_instance
+            num_qubits, graph_instance, max_qubits
         )
-    return block
+    return common.simplify_gate_sequence(block, num_qubits)
 
 
 def generate_guided_individual(
@@ -110,6 +143,7 @@ def generate_guided_individual(
     graph_instance: nx.Graph,
     max_params: int = 3,
     param_block_prob: float = 0.15,
+    max_qubits: Optional[int] = None,
     **_ignored,
 ) -> EvolutionaryIndividual:
     individual: EvolutionaryIndividual = [("H", q) for q in range(num_qubits)]
@@ -119,11 +153,16 @@ def generate_guided_individual(
         if random.random() < param_block_prob:
             individual.append(
                 generate_random_param_block(
-                    num_qubits, graph_instance, random.randint(0, max_params - 1)
+                    num_qubits,
+                    graph_instance,
+                    random.randint(0, max_params - 1),
+                    max_qubits,
                 )
             )
         else:
-            individual.append(generate_random_gate(num_qubits, graph_instance))
+            individual.append(
+                generate_random_gate(num_qubits, graph_instance, max_qubits)
+            )
 
     return individual
 
@@ -141,6 +180,8 @@ def mut_quantum_circuit(
     graph_instance: nx.Graph,
     indpb: float,
     max_params: int = 3,
+    param_block_prob: float = 0.15,
+    max_qubits: Optional[int] = None,
     **_ignored,
 ) -> Tuple[EvolutionaryIndividual]:
     i = num_qubits
@@ -154,7 +195,7 @@ def mut_quantum_circuit(
 
                 if random.random() < 0.5:
                     new_block = mutate_block_structure(
-                        list(block_gates), num_qubits, graph_instance
+                        list(block_gates), num_qubits, graph_instance, max_qubits
                     )
                     individual[i] = ("PARAM_BLOCK", param_idx, new_block, tree)
                 else:
@@ -179,18 +220,24 @@ def mut_quantum_circuit(
             elif action == "REPLACE":
                 individual[i] = (
                     generate_random_param_block(
-                        num_qubits, graph_instance, random.randint(0, max_params - 1)
+                        num_qubits,
+                        graph_instance,
+                        random.randint(0, max_params - 1),
+                        max_qubits,
                     )
-                    if random.random() < 0.2
-                    else generate_random_gate(num_qubits, graph_instance)
+                    if random.random() < param_block_prob
+                    else generate_random_gate(num_qubits, graph_instance, max_qubits)
                 )
             elif action == "INSERT":
                 item = (
                     generate_random_param_block(
-                        num_qubits, graph_instance, random.randint(0, max_params - 1)
+                        num_qubits,
+                        graph_instance,
+                        random.randint(0, max_params - 1),
+                        max_qubits,
                     )
-                    if random.random() < 0.2
-                    else generate_random_gate(num_qubits, graph_instance)
+                    if random.random() < param_block_prob
+                    else generate_random_gate(num_qubits, graph_instance, max_qubits)
                 )
                 individual.insert(i, item)
                 i += 1

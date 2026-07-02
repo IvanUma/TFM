@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import functools
 import json
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -26,15 +27,17 @@ if not hasattr(creator, "MultiIndividual"):
 toolbox: base.Toolbox = base.Toolbox()
 
 
-def evaluate_population(individuals, toolbox) -> int:
+def evaluate_population(individuals, toolbox, update_hof) -> int:
     invalid = [ind for ind in individuals if not ind.fitness.valid]
     if not invalid:
         return 0
 
     results = toolbox.map(toolbox.evaluate, invalid)
-    for ind, (fit, weights) in zip(invalid, results):
+    for ind, (fit, weights, hof_candidates) in zip(invalid, results):
         ind.fitness.values = fit
         ind.stored_thetas = weights
+        for block in hof_candidates:
+            update_hof(block)
 
     return len(invalid)
 
@@ -47,12 +50,12 @@ def main() -> None:
         APPROACH,
         CONFIG,
         CONFIG_PATH,
-        DEFAULT_INPUT_VALUES,
         ENABLE_INPUT_PARAMS,
-        MAX_PARAMS,
+        MAX_QUBITS,
         PARAM_BLOCK_PROB,
         EvolutionaryIndividual,
         build_quantum_circuit,
+        build_universal_input_values,
         cx_quantum_circuit,
         evaluate_circuit,
         generate_heuristic_individual,
@@ -60,6 +63,7 @@ def main() -> None:
         load_external_maxcut_instance,
         max_cut_fitness,
         mut_quantum_circuit,
+        update_hof,
     )
 
     instance_input = input(
@@ -71,13 +75,20 @@ def main() -> None:
         print(f"[ERROR] Instance file not found: {instance_path}")
         return
 
-    graph, num_qubits, optimal_classical_cut = load_external_maxcut_instance(
+    graph, instance_num_qubits, optimal_classical_cut = load_external_maxcut_instance(
         str(instance_path)
     )
     filename = instance_path.name
 
     if not CONFIG_PATH.exists():
         print(f"[ERROR] Config file not found: {CONFIG_PATH}")
+        return
+
+    if MAX_QUBITS and instance_num_qubits > MAX_QUBITS:
+        print(
+            f"[ERROR] Instance requires {instance_num_qubits} qubits but "
+            f"circuit_scale.max_qubits is {MAX_QUBITS}"
+        )
         return
 
     population_config = CONFIG["population"]
@@ -87,54 +98,70 @@ def main() -> None:
     evaluation_config = CONFIG["evaluation"]
     execution_config = CONFIG.get("execution", {})
 
+    if MAX_QUBITS:
+        circuit_qubits = MAX_QUBITS
+        input_values = build_universal_input_values(graph, MAX_QUBITS)
+    else:
+        circuit_qubits = instance_num_qubits
+        edges_list = list(graph.edges(data=True))
+        input_values = [data.get("weight", 1.0) for _, _, data in edges_list]
+
+    dynamic_max_params = len(input_values) if input_values else 1
+
     toolbox.register("clone", copy.deepcopy)
 
     toolbox.register(
         "individual",
         generate_guided_individual,
-        num_qubits=num_qubits,
+        num_qubits=circuit_qubits,
         length=max(
             evolution_config["guided_individual_length_min"],
-            num_qubits * evolution_config["guided_individual_length_factor"],
+            circuit_qubits * evolution_config["guided_individual_length_factor"],
         ),
         graph_instance=graph,
-        max_params=MAX_PARAMS,
+        max_params=dynamic_max_params,
         enable_input_params=ENABLE_INPUT_PARAMS,
         param_block_prob=PARAM_BLOCK_PROB,
+        max_qubits=MAX_QUBITS,
     )
 
     toolbox.register(
         "individual_heuristic",
         generate_heuristic_individual,
-        num_qubits=num_qubits,
+        num_qubits=circuit_qubits,
         graph_instance=graph,
     )
 
     toolbox.register("population", tools.initRepeat, list, toolbox.individual)
-    toolbox.register("mate", cx_quantum_circuit, num_qubits=num_qubits)
+    toolbox.register("mate", cx_quantum_circuit, num_qubits=circuit_qubits)
     toolbox.register(
         "mutate",
         mut_quantum_circuit,
-        num_qubits=num_qubits,
+        num_qubits=circuit_qubits,
         graph_instance=graph,
         indpb=variation_config["mutation_indpb"],
-        max_params=MAX_PARAMS,
+        max_params=dynamic_max_params,
         enable_input_params=ENABLE_INPUT_PARAMS,
+        param_block_prob=PARAM_BLOCK_PROB,
+        max_qubits=MAX_QUBITS,
     )
     toolbox.register("select", tools.selNSGA2)
 
     use_multiprocessing = execution_config.get("multiprocessing", True)
-    pool = (
-        Pool(processes=execution_config.get("processes", 4))
-        if use_multiprocessing
-        else None
-    )
+    requested_processes = execution_config.get("processes")
+    if not requested_processes:
+        cpu_total = os.cpu_count() or 1
+        requested_processes = max(1, cpu_total - 1)
+
+    pool = Pool(processes=requested_processes) if use_multiprocessing else None
     toolbox.register("map", pool.map if pool is not None else map)
 
     print("\n--- SINGLE INSTANCE CONFIGURATION ---")
     print(f"File loaded: {filename}")
-    print(f"Qubits / Scale: {num_qubits}")
-    print(f"Approach: {APPROACH.upper()}\n")
+    print(f"Instance nodes: {instance_num_qubits}")
+    print(f"Circuit qubits: {circuit_qubits}" + (" (universal)" if MAX_QUBITS else ""))
+    print(f"Approach: {APPROACH.upper()}")
+    print(f"Processes: {requested_processes if pool is not None else 1}\n")
 
     mu = population_config["mu"]
     lambda_ = population_config["lambda"]
@@ -150,6 +177,8 @@ def main() -> None:
     generations = evolution_config["generations"]
     initial_gamma = gamma_config["initial"]
     final_gamma = gamma_config["final"]
+    patience = evolution_config.get("patience", generations)
+    improvement_epsilon = evolution_config.get("improvement_epsilon", 0.0)
 
     logbook = tools.Logbook()
     logbook.header = ["gen", "shots", "gamma", "best_avg_ar", "best_depth"]
@@ -159,6 +188,10 @@ def main() -> None:
     statistics = tools.MultiStatistics(ar=stats_ar, depth=stats_depth)
     statistics.register("min", np.min)
     statistics.register("mean", np.mean)
+
+    best_ar_ever = -1.0
+    stagnant_generations = 0
+    last_gen = 0
 
     for gen in range(generations):
         progress = gen / (generations - 1) if generations > 1 else 1.0
@@ -176,21 +209,22 @@ def main() -> None:
             "evaluate",
             functools.partial(
                 evaluate_circuit,
-                num_qubits=num_qubits,
+                num_qubits=circuit_qubits,
                 graph_instance=graph,
                 optimal_classical_cut=optimal_classical_cut,
+                input_values=input_values,
                 shots=current_shots,
                 gamma=current_gamma,
             ),
         )
 
         if gen == 0:
-            evaluate_population(population, toolbox)
+            evaluate_population(population, toolbox, update_hof)
 
         offspring = algorithms.varOr(
             population, toolbox, lambda_, crossover_prob, mutation_prob
         )
-        evaluate_population(offspring, toolbox)
+        evaluate_population(offspring, toolbox, update_hof)
         population[:] = toolbox.select(population + offspring, mu)
 
         pareto_front = tools.sortNondominated(
@@ -212,6 +246,18 @@ def main() -> None:
 
         print(f"Gen {gen}: Approx Ratio = {best_avg_ar:.4f} | Depth = {best_depth:.1f}")
 
+        last_gen = gen
+
+        if best_avg_ar > best_ar_ever + improvement_epsilon:
+            best_ar_ever = best_avg_ar
+            stagnant_generations = 0
+        else:
+            stagnant_generations += 1
+
+        if stagnant_generations >= patience:
+            print(f"[INFO] Early stopping at generation {gen} (patience={patience})")
+            break
+
     if pool is not None:
         pool.close()
         pool.join()
@@ -220,20 +266,30 @@ def main() -> None:
         population, len(population), first_front_only=True
     )[0]
 
-    simulator = AerSimulator()
+    simulator = (
+        AerSimulator(method="stabilizer")
+        if APPROACH == "clifford"
+        else AerSimulator(method="statevector")
+    )
+
+    validation_circuits = []
+    for ind in pareto_front:
+        thetas = getattr(ind, "stored_thetas", [])
+        validation_circuits.append(
+            build_quantum_circuit(
+                ind, circuit_qubits, input_values, thetas, measure=True
+            )
+        )
+
+    validation_results = simulator.run(
+        validation_circuits, shots=evaluation_config["final_validation_shots"]
+    ).result()
+
     best_validation_avg_ar = -1.0
     best_individual = None
 
-    for ind in pareto_front:
-        thetas = getattr(ind, "stored_thetas", [])
-        qc = build_quantum_circuit(
-            ind, num_qubits, DEFAULT_INPUT_VALUES, thetas, measure=True
-        )
-        counts = (
-            simulator.run(qc, shots=evaluation_config["final_validation_shots"])
-            .result()
-            .get_counts()
-        )
+    for idx, ind in enumerate(pareto_front):
+        counts = validation_results.get_counts(idx)
         cut = max_cut_fitness(counts, graph, alpha=1.0)
         avg_val_ar = cut / optimal_classical_cut if optimal_classical_cut > 0 else 0.0
 
@@ -242,16 +298,17 @@ def main() -> None:
             best_individual = ind
 
     timestamp = datetime.now().strftime("%d%m%Y_%H%M%S")
-    output_dir = project_root / "results" / "single_instance" / APPROACH
+    instance_name = instance_path.stem
+    output_dir = project_root / "results" / "single_instance" / instance_name / APPROACH
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_stem = f"{filename}_opt_{APPROACH}_g{generations}_{timestamp}"
+    output_stem = f"{instance_name}_opt_{APPROACH}_g{last_gen + 1}_{timestamp}"
     sample_thetas = getattr(best_individual, "stored_thetas", [])
 
     qc_draw = build_quantum_circuit(
-        best_individual, num_qubits, DEFAULT_INPUT_VALUES, sample_thetas
+        best_individual, circuit_qubits, input_values, sample_thetas
     )
     qc_final = build_quantum_circuit(
-        best_individual, num_qubits, DEFAULT_INPUT_VALUES, sample_thetas, measure=True
+        best_individual, circuit_qubits, input_values, sample_thetas, measure=True
     )
 
     qc_draw.draw(output="mpl", filename=str(output_dir / f"{output_stem}.pdf"))
@@ -268,7 +325,11 @@ def main() -> None:
             "approach": APPROACH,
             "config_file": str(CONFIG_PATH),
             "instance_evaluated": filename,
-            "generations": generations,
+            "instance_num_qubits": instance_num_qubits,
+            "circuit_qubits": circuit_qubits,
+            "max_qubits": MAX_QUBITS,
+            "generations_configured": generations,
+            "generations_run": last_gen + 1,
             "mu": mu,
             "lambda": lambda_,
             "population": population_config,

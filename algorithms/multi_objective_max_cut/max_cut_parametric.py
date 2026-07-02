@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import functools
 import random
-from typing import List, Set, Tuple, Union
+from typing import List, Optional, Set, Tuple, Union
 
 import networkx as nx
 from qiskit import QuantumCircuit
@@ -27,26 +27,53 @@ def generate_random_gate(
     graph_instance: nx.Graph,
     max_params: int = 3,
     enable_input_params: bool = False,
+    param_block_prob: float = 0.15,
+    max_qubits: Optional[int] = None,
 ) -> QuantumGen:
-    gate: str = random.choice(CLIFFORD_GATES + PARAMETRIC_GATES)
-
-    if gate in PARAMETRIC_GATES:
+    if random.random() < param_block_prob:
+        gate = random.choice(PARAMETRIC_GATES)
         p_type = random.choice(["INPUT", "WEIGHT"]) if enable_input_params else "WEIGHT"
-        return (
-            "PARAM_BLOCK",
-            p_type,
-            random.randint(0, max_params - 1),
-            gate,
-            random.randint(0, num_qubits - 1),
-        )
-    elif gate == "CX" and graph_instance.number_of_edges() > 0:
-        edges = list(graph_instance.edges())
-        chosen_edge = random.choice(edges)
-        return (
-            ("CX", chosen_edge[0], chosen_edge[1])
-            if random.random() > 0.5
-            else ("CX", chosen_edge[1], chosen_edge[0])
-        )
+
+        if p_type == "INPUT":
+            if max_qubits:
+                pairs = common.enumerate_qubit_pairs(max_qubits)
+                if pairs and random.random() < 0.8:
+                    i, j = random.choice(pairs)
+                    p_idx = common.pair_index(i, j, max_qubits)
+                    qubit = random.choice((i, j))
+                else:
+                    p_idx = random.randint(0, max_params - 1) if max_params > 0 else 0
+                    qubit = random.randint(0, num_qubits - 1)
+            else:
+                edges = list(graph_instance.edges())
+                if edges and random.random() < 0.8:
+                    edge_idx = random.randrange(len(edges))
+                    p_idx = edge_idx
+                    qubit = random.choice(edges[edge_idx])
+                else:
+                    p_idx = random.randint(0, max_params - 1) if max_params > 0 else 0
+                    qubit = random.randint(0, num_qubits - 1)
+        else:
+            p_idx = random.randint(0, max_params - 1) if max_params > 0 else 0
+            qubit = random.randint(0, num_qubits - 1)
+
+        return ("PARAM_BLOCK", p_type, p_idx, gate, qubit)
+
+    gate = random.choice(CLIFFORD_GATES)
+    if gate == "CX":
+        if max_qubits:
+            i, j = random.choice(common.enumerate_qubit_pairs(max_qubits))
+            return ("CX", i, j) if random.random() > 0.5 else ("CX", j, i)
+        if graph_instance.number_of_edges() > 0:
+            edges = list(graph_instance.edges())
+            chosen_edge = random.choice(edges)
+            return (
+                ("CX", chosen_edge[0], chosen_edge[1])
+                if random.random() > 0.5
+                else ("CX", chosen_edge[1], chosen_edge[0])
+            )
+        gate = random.choice(["H", "S"])
+
     return (gate, random.randint(0, num_qubits - 1))
 
 
@@ -56,6 +83,8 @@ def generate_guided_individual(
     graph_instance: nx.Graph,
     max_params: int = 3,
     enable_input_params: bool = False,
+    param_block_prob: float = 0.15,
+    max_qubits: Optional[int] = None,
     **_ignored,
 ) -> EvolutionaryIndividual:
     individual = [("H", i) for i in range(num_qubits)]
@@ -67,6 +96,8 @@ def generate_guided_individual(
                 graph_instance,
                 max_params=max_params,
                 enable_input_params=enable_input_params,
+                param_block_prob=param_block_prob,
+                max_qubits=max_qubits,
             )
         )
     return individual
@@ -93,12 +124,16 @@ def mut_quantum_circuit(
     indpb: float,
     max_params: int = 3,
     enable_input_params: bool = False,
+    param_block_prob: float = 0.15,
+    max_qubits: Optional[int] = None,
     **_ignored,
 ) -> Tuple[EvolutionaryIndividual]:
     gate_generator = functools.partial(
         generate_random_gate,
         max_params=max_params,
         enable_input_params=enable_input_params,
+        param_block_prob=param_block_prob,
+        max_qubits=max_qubits,
     )
     return common.mut_quantum_circuit(
         individual, num_qubits, graph_instance, indpb, gate_generator=gate_generator

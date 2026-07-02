@@ -98,7 +98,8 @@ def load_external_maxcut_instance(file_path: str) -> Tuple[nx.Graph, int, float]
 
 
 def _bitstring_cut_value(bitstring: str, graph_instance: nx.Graph) -> float:
-    bits = bitstring.replace(" ", "")[::-1]
+    num_nodes = graph_instance.number_of_nodes()
+    bits = bitstring.replace(" ", "").zfill(num_nodes)[::-1]
     cut = 0.0
     for u, v, data in graph_instance.edges(data=True):
         if bits[u] != bits[v]:
@@ -107,33 +108,54 @@ def _bitstring_cut_value(bitstring: str, graph_instance: nx.Graph) -> float:
 
 
 def max_cut_fitness(
-    counts: Dict[str, int],
+    weights: Dict[str, float],
     graph_instance: nx.Graph,
     alpha: float = 1.0,
 ) -> float:
-    total_shots = sum(counts.values())
-    if total_shots == 0:
+    total_weight = sum(weights.values())
+    if total_weight == 0:
         return 0.0
 
-    alpha = min(max(alpha, 1e-3), 1.0)
-    keep = max(1, int(np.ceil(alpha * total_shots)))
+    alpha = min(max(alpha, 1e-6), 1.0)
+    target_mass = alpha * total_weight
 
     outcomes = sorted(
-        ((_bitstring_cut_value(bs, graph_instance), c) for bs, c in counts.items()),
+        ((_bitstring_cut_value(bs, graph_instance), w) for bs, w in weights.items()),
         key=lambda item: item[0],
         reverse=True,
     )
 
-    accumulated = 0
+    accumulated = 0.0
     weighted_sum = 0.0
-    for cut_value, count in outcomes:
-        take = min(count, keep - accumulated)
+    for cut_value, w in outcomes:
+        take = min(w, target_mass - accumulated)
         if take <= 0:
             break
         weighted_sum += cut_value * take
         accumulated += take
 
-    return weighted_sum / accumulated if accumulated else 0.0
+    return weighted_sum / accumulated if accumulated > 0 else 0.0
+
+
+def enumerate_qubit_pairs(max_qubits: int) -> List[Tuple[int, int]]:
+    return [(i, j) for i in range(max_qubits) for j in range(i + 1, max_qubits)]
+
+
+def pair_index(i: int, j: int, max_qubits: int) -> int:
+    if i > j:
+        i, j = j, i
+    return i * (2 * max_qubits - i - 1) // 2 + (j - i - 1)
+
+
+def build_universal_input_values(
+    graph_instance: nx.Graph,
+    max_qubits: int,
+) -> List[float]:
+    total_pairs = max_qubits * (max_qubits - 1) // 2
+    values = [0.0] * total_pairs
+    for u, v, data in graph_instance.edges(data=True):
+        values[pair_index(u, v, max_qubits)] = data.get("weight", 1.0)
+    return values
 
 
 def generate_random_gate(
@@ -287,17 +309,17 @@ def mut_quantum_circuit(
     return (individual,)
 
 
-def simplify_circuit(individual: EvolutionaryIndividual, num_qubits: int):
-    prefix = individual[:num_qubits]
-    mutable = list(individual[num_qubits:])
-
+def simplify_gate_sequence(
+    gates: List[QuantumGen],
+    num_qubits: int,
+) -> List[QuantumGen]:
     qc = QuantumCircuit(num_qubits)
-    apply_block(qc, mutable)
+    apply_block(qc, gates)
 
     pm = PassManager([CommutativeCancellation(), Optimize1qGatesSimpleCommutation()])
     qc = pm.run(qc)
 
-    optimized = []
+    optimized: List[QuantumGen] = []
     for inst in qc.data:
         name = inst.operation.name.upper()
         qubits = [qc.find_bit(q).index for q in inst.qubits]
@@ -309,7 +331,13 @@ def simplify_circuit(individual: EvolutionaryIndividual, num_qubits: int):
         elif name == "CX":
             optimized.append(("CX", qubits[0], qubits[1]))
 
-    return prefix + optimized
+    return optimized if optimized else list(gates)
+
+
+def simplify_circuit(individual: EvolutionaryIndividual, num_qubits: int):
+    prefix = individual[:num_qubits]
+    mutable = list(individual[num_qubits:])
+    return prefix + simplify_gate_sequence(mutable, num_qubits)
 
 
 def build_quantum_circuit(
@@ -317,7 +345,6 @@ def build_quantum_circuit(
     num_qubits: int,
     measure: bool = False,
 ):
-    """Constructor "plano" sin parámetros (baseline Clifford puro)."""
     qc = QuantumCircuit(num_qubits)
     apply_block(qc, individual)
     if measure:
