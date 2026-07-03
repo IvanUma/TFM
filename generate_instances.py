@@ -59,10 +59,9 @@ if __name__ == "__main__":
         (10, 0.4),
         (14, 0.3),
         (20, 0.3),
-        (30, 0.25),
     ]
 
-    instances_per_group = 3
+    instances_per_group = 4
 
     for nodes, p in qubit_groups:
         for _ in range(instances_per_group):

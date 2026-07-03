@@ -30,7 +30,12 @@
         "param_block_prob": 0.15
     },
     "circuit_scale": {
-        "max_qubits": null
+        "max_qubits": 10,
+        "instance_qubits_filter": 10
+    },
+    "instance_split": {
+        "validation_fraction": 0.2,
+        "seed": 42
     },
     "execution": {
         "multiprocessing": true,
