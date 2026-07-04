@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import functools
+import math
 import operator
 import random
-from typing import List, Set, Tuple, Union
+from typing import Callable, Dict, List, Set, Tuple, Union
 
 import networkx as nx
-import numpy as np
 from deap import gp
 from qiskit import QuantumCircuit
 
@@ -27,8 +27,8 @@ def safe_mod(a, b):
 
 
 pset.addPrimitive(safe_mod, 2)
-pset.addPrimitive(np.sin, 1)
-pset.addPrimitive(np.cos, 1)
+pset.addPrimitive(math.sin, 1)
+pset.addPrimitive(math.cos, 1)
 
 
 def generate_rand_const():
@@ -36,6 +36,18 @@ def generate_rand_const():
 
 
 pset.addEphemeralConstant("rand_const", generate_rand_const)
+
+_COMPILED_TREE_CACHE: Dict[str, Callable] = {}
+
+
+def get_compiled_repetition_function(tree: gp.PrimitiveTree) -> Callable:
+    key = str(tree)
+    compiled = _COMPILED_TREE_CACHE.get(key)
+    if compiled is None:
+        compiled = gp.compile(tree, pset)
+        _COMPILED_TREE_CACHE[key] = compiled
+    return compiled
+
 
 QuantumGen = Union[
     Tuple[str, int],
@@ -247,7 +259,7 @@ def build_quantum_circuit(
     individual: EvolutionaryIndividual,
     num_qubits: int,
     input_values: List[float] = [0.0],
-    weight_values: List[float] = [0.0],
+    weight_values: Dict[int, float] = {},
     measure: bool = False,
 ) -> QuantumCircuit:
     qc = QuantumCircuit(num_qubits)
@@ -255,14 +267,12 @@ def build_quantum_circuit(
     for gen in individual:
         if gen[0] == "PARAM_BLOCK":
             param_idx, block_gates, tree = gen[1], gen[2], gen[3]
-            func = gp.compile(tree, pset)
+            func = get_compiled_repetition_function(tree)
 
             in_val = (
                 input_values[param_idx % len(input_values)] if input_values else 0.0
             )
-            w_val = (
-                weight_values[param_idx % len(weight_values)] if weight_values else 0.0
-            )
+            w_val = weight_values.get(param_idx, 0.0)
 
             try:
                 raw = func(in_val, w_val)

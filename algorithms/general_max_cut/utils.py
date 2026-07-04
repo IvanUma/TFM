@@ -4,7 +4,7 @@ import importlib
 import json
 import logging
 from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import networkx as nx
 import numpy as np
@@ -86,17 +86,18 @@ def evaluate_circuit(
     instances: List[InstanceData],
     shots: int,
     gamma: float,
-) -> Tuple[Tuple[float, float], List[float], List[list]]:
-    _, weight_indices = get_param_indices(individual)
-    num_weights = max(weight_indices) + 1 if weight_indices else 0
+) -> Tuple[Tuple[float, float], Dict[int, float], List[list]]:
+    _, weight_indices_set = get_param_indices(individual)
+    sorted_weight_indices = sorted(weight_indices_set)
+    num_weights = len(sorted_weight_indices)
 
     simulator = get_training_simulator()
 
-    def objective(weight_values) -> float:
-        weight_list = list(weight_values)
+    def objective(weight_vector) -> float:
+        weight_map = dict(zip(sorted_weight_indices, weight_vector))
         circuits = [
             build_quantum_circuit(
-                individual, num_qubits, inst_input, weight_list, measure=True
+                individual, num_qubits, inst_input, weight_map, measure=True
             )
             for _, _, inst_input in instances
         ]
@@ -119,10 +120,10 @@ def evaluate_circuit(
             options={"maxiter": maxiter},
         )
         best_avg_ratio = -result.fun
-        best_weights = [float(w) for w in result.x]
+        best_weights = dict(zip(sorted_weight_indices, (float(w) for w in result.x)))
     else:
         best_avg_ratio = -objective([])
-        best_weights = []
+        best_weights = {}
 
     depths = [
         build_quantum_circuit(

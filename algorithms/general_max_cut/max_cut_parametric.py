@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import functools
 import random
-from typing import List, Set, Tuple, Union
+from typing import Dict, List, Set, Tuple, Union
 
 import networkx as nx
 from qiskit import QuantumCircuit
@@ -146,7 +146,7 @@ def build_quantum_circuit(
     individual: EvolutionaryIndividual,
     num_qubits: int,
     input_values: List[float] = [0.0],
-    weight_values: List[float] = [0.0],
+    weight_values: Dict[int, float] = {},
     measure: bool = False,
 ) -> QuantumCircuit:
     qc = QuantumCircuit(num_qubits)
@@ -158,9 +158,7 @@ def build_quantum_circuit(
             if p_type == "INPUT":
                 theta = input_values[p_idx % len(input_values)] if input_values else 0.0
             else:
-                theta = (
-                    weight_values[p_idx % len(weight_values)] if weight_values else 0.0
-                )
+                theta = weight_values.get(p_idx, 0.0)
 
             if rot_gate == "RX":
                 qc.rx(theta, qubit)

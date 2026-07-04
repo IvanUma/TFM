@@ -394,7 +394,7 @@ def main() -> None:
     per_individual_reports = []
 
     for ind in pareto_front:
-        thetas = getattr(ind, "stored_thetas", [])
+        thetas = getattr(ind, "stored_thetas", {})
         circuits = [
             build_quantum_circuit(ind, circuit_qubits, inst_input, thetas, measure=True)
             for _, _, _, inst_input in evaluation_set
@@ -418,10 +418,18 @@ def main() -> None:
             per_individual_reports = per_instance
 
     timestamp = datetime.now().strftime("%d%m%Y_%H%M%S")
-    output_dir = project_root / "results" / "general_max_cut" / run_label / APPROACH
+    output_dir = (
+        project_root
+        / "results"
+        / "general_max_cut"
+        / f"{circuit_qubits}_qubits"
+        / APPROACH
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_stem = f"{run_label}_opt_{APPROACH}_g{last_gen + 1}_{timestamp}"
-    sample_thetas = getattr(best_individual, "stored_thetas", [])
+    output_stem = (
+        f"{run_label}_{circuit_qubits}q_opt_{APPROACH}_g{last_gen + 1}_{timestamp}"
+    )
+    sample_thetas = getattr(best_individual, "stored_thetas", {})
     example_input_values = evaluation_set[0][3]
 
     qc_draw = build_quantum_circuit(
