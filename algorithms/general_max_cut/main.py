@@ -19,6 +19,8 @@ from deap import algorithms, base, creator, tools
 from qiskit import qpy
 from qiskit_aer import AerSimulator
 
+from timing import aggregate_simulation_seconds
+
 matplotlib.use("Agg")
 
 if not hasattr(creator, "MultiFitness"):
@@ -40,15 +42,20 @@ def evaluate_population(individuals, toolbox, update_hof) -> Tuple[int, float]:
         return 0, 0.0
 
     results = toolbox.map(toolbox.evaluate, invalid)
-    batch_simulation_seconds = 0.0
+    per_individual_simulation_seconds = []
     for ind, (fit, weights, hof_candidates, simulation_seconds) in zip(
         invalid, results
     ):
         ind.fitness.values = fit
         ind.stored_thetas = weights
-        batch_simulation_seconds += simulation_seconds
+        per_individual_simulation_seconds.append(simulation_seconds)
         for block in hof_candidates:
             update_hof(block)
+
+    batch_simulation_seconds = aggregate_simulation_seconds(
+        per_individual_simulation_seconds,
+        parallelize=getattr(toolbox, "parallel_evaluation", False),
+    )
 
     return len(invalid), batch_simulation_seconds
 
@@ -240,6 +247,7 @@ def main() -> None:
             requested_processes = max(1, cpu_total - 1)
 
     pool = Pool(processes=requested_processes) if use_multiprocessing else None
+    toolbox.parallel_evaluation = pool is not None
     toolbox.register("map", pool.map if pool is not None else map)
 
     print("\n--- RUN CONFIGURATION ---")
@@ -359,10 +367,15 @@ def main() -> None:
             **record,
         )
 
+        sim_share_pct = (
+            (gen_simulation_seconds / gen_wall_seconds) * 100.0
+            if gen_wall_seconds > 0.0
+            else 0.0
+        )
         print(
             f"Gen {gen}: Approx Ratio = {best_avg_ar:.4f} | Depth = {best_depth:.1f} | "
             f"Wall = {gen_wall_seconds:.2f}s | CPU = {gen_cpu_seconds:.2f}s | "
-            f"Sim = {gen_simulation_seconds:.2f}s"
+            f"Sim = {gen_simulation_seconds:.2f}s ({sim_share_pct:.1f}% of wall)"
         )
 
         last_gen = gen
@@ -383,9 +396,15 @@ def main() -> None:
     avg_cpu_per_gen = total_cpu_seconds / (last_gen + 1)
     avg_simulation_per_gen = total_simulation_seconds / (last_gen + 1)
 
+    total_sim_share_pct = (
+        (total_simulation_seconds / total_wall_seconds) * 100.0
+        if total_wall_seconds > 0.0
+        else 0.0
+    )
     print(
         f"\n[TIMING] Total: Wall = {total_wall_seconds:.2f}s | CPU = {total_cpu_seconds:.2f}s | "
-        f"Simulation = {total_simulation_seconds:.2f}s over {last_gen + 1} generations"
+        f"Simulation = {total_simulation_seconds:.2f}s ({total_sim_share_pct:.1f}% of wall) "
+        f"over {last_gen + 1} generations"
     )
     print(
         f"[TIMING] Average per generation: Wall = {avg_wall_per_gen:.2f}s | "
