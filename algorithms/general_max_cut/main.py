@@ -34,19 +34,23 @@ def cpu_seconds_snapshot() -> float:
     return times.user + times.system + times.children_user + times.children_system
 
 
-def evaluate_population(individuals, toolbox, update_hof) -> int:
+def evaluate_population(individuals, toolbox, update_hof) -> Tuple[int, float]:
     invalid = [ind for ind in individuals if not ind.fitness.valid]
     if not invalid:
-        return 0
+        return 0, 0.0
 
     results = toolbox.map(toolbox.evaluate, invalid)
-    for ind, (fit, weights, hof_candidates) in zip(invalid, results):
+    batch_simulation_seconds = 0.0
+    for ind, (fit, weights, hof_candidates, simulation_seconds) in zip(
+        invalid, results
+    ):
         ind.fitness.values = fit
         ind.stored_thetas = weights
+        batch_simulation_seconds += simulation_seconds
         for block in hof_candidates:
             update_hof(block)
 
-    return len(invalid)
+    return len(invalid), batch_simulation_seconds
 
 
 def load_instance_set(
@@ -58,20 +62,19 @@ def load_instance_set(
 ) -> List[Tuple[str, object, float, List[float]]]:
     instance_files = sorted(p for p in instances_dir.iterdir() if p.is_file())
     loaded = []
-    skipped = 0
+    skipped_by_filter = 0
+    skipped_too_large = 0
 
     for path in instance_files:
         graph, num_nodes, optimal_cut = load_external_maxcut_instance(str(path))
 
         if instance_qubits_filter is not None and num_nodes != instance_qubits_filter:
-            skipped += 1
+            skipped_by_filter += 1
             continue
 
         if num_nodes > max_qubits:
-            raise ValueError(
-                f"Instance {path.name} requires {num_nodes} qubits but "
-                f"circuit_scale.max_qubits is {max_qubits}"
-            )
+            skipped_too_large += 1
+            continue
 
         input_values = build_universal_input_values(graph, max_qubits)
         loaded.append((path.name, graph, optimal_cut, input_values))
@@ -79,7 +82,12 @@ def load_instance_set(
     if instance_qubits_filter is not None:
         print(
             f"[INFO] Filtered to {len(loaded)} instances with "
-            f"{instance_qubits_filter} nodes ({skipped} skipped)"
+            f"{instance_qubits_filter} nodes ({skipped_by_filter} skipped by filter)"
+        )
+    if skipped_too_large > 0:
+        print(
+            f"[INFO] Skipped {skipped_too_large} instance(s) exceeding "
+            f"circuit_scale.max_qubits={max_qubits}"
         )
 
     return loaded
@@ -122,7 +130,9 @@ def main() -> None:
         PARAM_BLOCK_PROB,
         SPLIT_SEED,
         VALIDATION_FRACTION,
-        EvolutionaryIndividual,
+        SIMULATOR_METHOD,
+        SIMULATOR_THREADS,
+        SIMULATOR_DEVICE,
         build_quantum_circuit,
         build_universal_input_values,
         cx_quantum_circuit,
@@ -223,8 +233,11 @@ def main() -> None:
     use_multiprocessing = execution_config.get("multiprocessing", True)
     requested_processes = execution_config.get("processes")
     if not requested_processes:
-        cpu_total = os.cpu_count() or 1
-        requested_processes = max(1, cpu_total - 1)
+        if SIMULATOR_DEVICE == "GPU":
+            requested_processes = 2
+        else:
+            cpu_total = os.cpu_count() or 1
+            requested_processes = max(1, cpu_total - 1)
 
     pool = Pool(processes=requested_processes) if use_multiprocessing else None
     toolbox.register("map", pool.map if pool is not None else map)
@@ -235,7 +248,11 @@ def main() -> None:
     print(f"Validation instances: {len(validation_data)}")
     print(f"Circuit qubits: {circuit_qubits}")
     print(f"Approach: {APPROACH.upper()}")
-    print(f"Processes: {requested_processes if pool is not None else 1}\n")
+    print(f"Processes: {requested_processes if pool is not None else 1}")
+    print(
+        f"Simulator: {SIMULATOR_METHOD} on {SIMULATOR_DEVICE} "
+        f"(max_parallel_threads={SIMULATOR_THREADS or 'auto'})\n"
+    )
 
     mu = population_config["mu"]
     lambda_ = population_config["lambda"]
@@ -263,6 +280,7 @@ def main() -> None:
         "best_depth",
         "wall_seconds",
         "cpu_seconds",
+        "simulation_seconds",
     ]
 
     stats_ar = tools.Statistics(key=lambda ind: ind.fitness.values[0])
@@ -277,10 +295,12 @@ def main() -> None:
 
     run_start_wall = time.perf_counter()
     run_start_cpu = cpu_seconds_snapshot()
+    total_simulation_seconds = 0.0
 
     for gen in range(generations):
         gen_start_wall = time.perf_counter()
         gen_start_cpu = cpu_seconds_snapshot()
+        gen_simulation_seconds = 0.0
 
         progress = gen / (generations - 1) if generations > 1 else 1.0
         current_shots = int(
@@ -305,12 +325,14 @@ def main() -> None:
         )
 
         if gen == 0:
-            evaluate_population(population, toolbox, update_hof)
+            _, seconds_spent = evaluate_population(population, toolbox, update_hof)
+            gen_simulation_seconds += seconds_spent
 
         offspring = algorithms.varOr(
             population, toolbox, lambda_, crossover_prob, mutation_prob
         )
-        evaluate_population(offspring, toolbox, update_hof)
+        _, seconds_spent = evaluate_population(offspring, toolbox, update_hof)
+        gen_simulation_seconds += seconds_spent
         population[:] = toolbox.select(population + offspring, mu)
 
         pareto_front = tools.sortNondominated(
@@ -323,6 +345,7 @@ def main() -> None:
 
         gen_wall_seconds = time.perf_counter() - gen_start_wall
         gen_cpu_seconds = cpu_seconds_snapshot() - gen_start_cpu
+        total_simulation_seconds += gen_simulation_seconds
 
         logbook.record(
             gen=gen,
@@ -332,12 +355,14 @@ def main() -> None:
             best_depth=best_depth,
             wall_seconds=gen_wall_seconds,
             cpu_seconds=gen_cpu_seconds,
+            simulation_seconds=gen_simulation_seconds,
             **record,
         )
 
         print(
             f"Gen {gen}: Approx Ratio = {best_avg_ar:.4f} | Depth = {best_depth:.1f} | "
-            f"Wall = {gen_wall_seconds:.2f}s | CPU = {gen_cpu_seconds:.2f}s"
+            f"Wall = {gen_wall_seconds:.2f}s | CPU = {gen_cpu_seconds:.2f}s | "
+            f"Sim = {gen_simulation_seconds:.2f}s"
         )
 
         last_gen = gen
@@ -356,14 +381,15 @@ def main() -> None:
     total_cpu_seconds = cpu_seconds_snapshot() - run_start_cpu
     avg_wall_per_gen = total_wall_seconds / (last_gen + 1)
     avg_cpu_per_gen = total_cpu_seconds / (last_gen + 1)
+    avg_simulation_per_gen = total_simulation_seconds / (last_gen + 1)
 
     print(
-        f"\n[TIMING] Total: Wall = {total_wall_seconds:.2f}s | CPU = {total_cpu_seconds:.2f}s "
-        f"over {last_gen + 1} generations"
+        f"\n[TIMING] Total: Wall = {total_wall_seconds:.2f}s | CPU = {total_cpu_seconds:.2f}s | "
+        f"Simulation = {total_simulation_seconds:.2f}s over {last_gen + 1} generations"
     )
     print(
         f"[TIMING] Average per generation: Wall = {avg_wall_per_gen:.2f}s | "
-        f"CPU = {avg_cpu_per_gen:.2f}s\n"
+        f"CPU = {avg_cpu_per_gen:.2f}s | Simulation = {avg_simulation_per_gen:.2f}s\n"
     )
 
     if pool is not None:
@@ -374,11 +400,7 @@ def main() -> None:
         population, len(population), first_front_only=True
     )[0]
 
-    simulator = (
-        AerSimulator(method="stabilizer")
-        if APPROACH == "clifford"
-        else AerSimulator(method="statevector")
-    )
+    simulator = AerSimulator(method=SIMULATOR_METHOD, device=SIMULATOR_DEVICE)
 
     def training_instances_as_named(data):
         return [(f"training_{i}", g, o, inp) for i, (g, o, inp) in enumerate(data)]
@@ -460,6 +482,7 @@ def main() -> None:
     history_depth = logbook.select("best_depth")
     history_wall_seconds = logbook.select("wall_seconds")
     history_cpu_seconds = logbook.select("cpu_seconds")
+    history_simulation_seconds = logbook.select("simulation_seconds")
 
     output_data = {
         "config": {
@@ -468,6 +491,8 @@ def main() -> None:
             "source": filename,
             "circuit_qubits": circuit_qubits,
             "max_qubits": MAX_QUBITS,
+            "simulator_method": SIMULATOR_METHOD,
+            "simulator_device": SIMULATOR_DEVICE,
             "training_instances": len(training_data),
             "validation_instances": len(validation_data),
             "generations_configured": generations,
@@ -489,8 +514,10 @@ def main() -> None:
         "timing": {
             "total_wall_seconds": float(total_wall_seconds),
             "total_cpu_seconds": float(total_cpu_seconds),
+            "total_simulation_seconds": float(total_simulation_seconds),
             "avg_wall_seconds_per_generation": float(avg_wall_per_gen),
             "avg_cpu_seconds_per_generation": float(avg_cpu_per_gen),
+            "avg_simulation_seconds_per_generation": float(avg_simulation_per_gen),
         },
         "history": {
             "generation": [int(g) for g in generations_axis],
@@ -498,6 +525,7 @@ def main() -> None:
             "best_depth": [float(d) for d in history_depth],
             "wall_seconds": [float(w) for w in history_wall_seconds],
             "cpu_seconds": [float(c) for c in history_cpu_seconds],
+            "simulation_seconds": [float(s) for s in history_simulation_seconds],
         },
     }
 

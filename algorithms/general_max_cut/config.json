@@ -1,5 +1,5 @@
 {
-    "approach": "clifford",
+    "approach": "parametric",
     "population": {
         "mu": 100,
         "lambda": 40
@@ -30,8 +30,8 @@
         "param_block_prob": 0.15
     },
     "circuit_scale": {
-        "max_qubits": 10,
-        "instance_qubits_filter": 10
+        "max_qubits": 14,
+        "instance_qubits_filter": null
     },
     "instance_split": {
         "validation_fraction": 0.2,
@@ -39,6 +39,9 @@
     },
     "execution": {
         "multiprocessing": true,
-        "processes": null
+        "processes": null,
+        "device": "auto",
+        "stabilizer_max_parallel_threads": 1,
+        "statevector_max_parallel_threads": 0
     }
 }

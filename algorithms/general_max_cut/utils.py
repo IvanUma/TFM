@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -52,14 +53,64 @@ build_universal_input_values = common.build_universal_input_values
 
 InstanceData = Tuple[nx.Graph, float, List[float]]
 
+_execution_cfg = CONFIG.get("execution", {})
+_STABILIZER_THREADS: int = _execution_cfg.get("stabilizer_max_parallel_threads", 1)
+_STATEVECTOR_THREADS: int = _execution_cfg.get("statevector_max_parallel_threads", 0)
+_REQUESTED_DEVICE: str = _execution_cfg.get("device", "auto")
+
+SIMULATOR_METHOD: str = "stabilizer" if APPROACH == "clifford" else "statevector"
+SIMULATOR_THREADS: int = (
+    _STABILIZER_THREADS if APPROACH == "clifford" else _STATEVECTOR_THREADS
+)
+
+
+def _resolve_device(requested_device: str, method: str) -> str:
+    if method != "statevector":
+        return "CPU"
+
+    try:
+        available = AerSimulator().available_devices()
+    except Exception as exc:
+        logger.warning("Could not query available simulator devices (%s)", exc)
+        available = ("CPU",)
+
+    if requested_device == "CPU":
+        return "CPU"
+
+    if requested_device == "GPU":
+        if "GPU" in available:
+            return "GPU"
+        logger.warning("GPU requested but not available; falling back to CPU")
+        return "CPU"
+
+    return "GPU" if "GPU" in available else "CPU"
+
+
+SIMULATOR_DEVICE: str = _resolve_device(_REQUESTED_DEVICE, SIMULATOR_METHOD)
+
 _TRAINING_SIMULATOR = None
 
 
 def get_training_simulator() -> AerSimulator:
     global _TRAINING_SIMULATOR
     if _TRAINING_SIMULATOR is None:
-        method = "stabilizer" if APPROACH == "clifford" else "statevector"
-        _TRAINING_SIMULATOR = AerSimulator(method=method, max_parallel_threads=1)
+        try:
+            _TRAINING_SIMULATOR = AerSimulator(
+                method=SIMULATOR_METHOD,
+                device=SIMULATOR_DEVICE,
+                max_parallel_threads=SIMULATOR_THREADS,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to initialize simulator with device=%s (%s); falling back to CPU",
+                SIMULATOR_DEVICE,
+                exc,
+            )
+            _TRAINING_SIMULATOR = AerSimulator(
+                method=SIMULATOR_METHOD,
+                device="CPU",
+                max_parallel_threads=SIMULATOR_THREADS,
+            )
     return _TRAINING_SIMULATOR
 
 
@@ -86,14 +137,16 @@ def evaluate_circuit(
     instances: List[InstanceData],
     shots: int,
     gamma: float,
-) -> Tuple[Tuple[float, float], Dict[int, float], List[list]]:
+) -> Tuple[Tuple[float, float], Dict[int, float], List[list], float]:
     _, weight_indices_set = get_param_indices(individual)
     sorted_weight_indices = sorted(weight_indices_set)
     num_weights = len(sorted_weight_indices)
 
     simulator = get_training_simulator()
+    simulation_seconds = 0.0
 
     def objective(weight_vector) -> float:
+        nonlocal simulation_seconds
         weight_map = dict(zip(sorted_weight_indices, weight_vector))
         circuits = [
             build_quantum_circuit(
@@ -101,7 +154,9 @@ def evaluate_circuit(
             )
             for _, _, inst_input in instances
         ]
+        sim_start = time.perf_counter()
         results = simulator.run(circuits, shots=shots).result()
+        simulation_seconds += time.perf_counter() - sim_start
 
         ratios = []
         for idx, (graph_instance, optimal_cut, _) in enumerate(instances):
@@ -137,4 +192,9 @@ def evaluate_circuit(
     if best_avg_ratio > 0.8 and APPROACH == "clifford":
         hof_candidates = [gen[2] for gen in individual if gen[0] == "PARAM_BLOCK"]
 
-    return (-best_avg_ratio, avg_depth), best_weights, hof_candidates
+    return (
+        (-best_avg_ratio, avg_depth),
+        best_weights,
+        hof_candidates,
+        simulation_seconds,
+    )
