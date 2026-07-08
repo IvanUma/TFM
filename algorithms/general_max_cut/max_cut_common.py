@@ -48,8 +48,8 @@ def compute_optimal_cut(
         return best, True
 
     logger.warning(
-        "Grafo con %d nodos supera el límite de fuerza bruta (%d); "
-        "se usará la heurística one_exchange de networkx (óptimo aproximado).",
+        "Graph with %d nodes exceeds brute force limit (%d); "
+        "falling back to networkx one_exchange heuristic (approximate optimum).",
         n,
         brute_force_limit,
     )
@@ -85,9 +85,9 @@ def load_external_maxcut_instance(file_path: str) -> Tuple[nx.Graph, int, float]
     else:
         optimal_cut, is_exact = compute_optimal_cut(graph_instance)
         logger.info(
-            "Óptimo clásico no presente en %s; calculado %s -> %.3f",
+            "Classical optimum not present in %s; computed %s -> %.3f",
             file_path,
-            "exactamente" if is_exact else "heurísticamente",
+            "exactly" if is_exact else "heuristically",
             optimal_cut,
         )
 
@@ -136,27 +136,6 @@ def max_cut_fitness(
 
 def enumerate_qubit_pairs(max_qubits: int) -> List[Tuple[int, int]]:
     return [(i, j) for i in range(max_qubits) for j in range(i + 1, max_qubits)]
-
-
-def pair_index(i: int, j: int, max_qubits: int) -> int:
-    if i > j:
-        i, j = j, i
-    return i * (2 * max_qubits - i - 1) // 2 + (j - i - 1)
-
-
-def pair_from_index(idx: int, max_qubits: int) -> Tuple[int, int]:
-    return enumerate_qubit_pairs(max_qubits)[idx]
-
-
-def build_universal_input_values(
-    graph_instance: nx.Graph,
-    max_qubits: int,
-) -> List[float]:
-    total_pairs = max_qubits * (max_qubits - 1) // 2
-    values = [0.0] * total_pairs
-    for u, v, data in graph_instance.edges(data=True):
-        values[pair_index(u, v, max_qubits)] = data.get("weight", 1.0)
-    return values
 
 
 def apply_block(qc: QuantumCircuit, block: EvolutionaryIndividual) -> None:

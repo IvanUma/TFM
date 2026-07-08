@@ -33,20 +33,8 @@ def generate_random_gate(
     if random.random() < param_block_prob:
         gate = random.choice(PARAMETRIC_GATES)
         p_type = random.choice(["INPUT", "WEIGHT"]) if enable_input_params else "WEIGHT"
-
-        if p_type == "INPUT":
-            pairs = common.enumerate_qubit_pairs(max_qubits)
-            if pairs and random.random() < 0.8:
-                i, j = random.choice(pairs)
-                p_idx = common.pair_index(i, j, max_qubits)
-                qubit = random.choice((i, j))
-            else:
-                p_idx = random.randint(0, max_params - 1) if max_params > 0 else 0
-                qubit = random.randint(0, num_qubits - 1)
-        else:
-            p_idx = random.randint(0, max_params - 1) if max_params > 0 else 0
-            qubit = random.randint(0, num_qubits - 1)
-
+        p_idx = random.randint(0, max_params - 1) if max_params > 0 else 0
+        qubit = random.randint(0, num_qubits - 1)
         return ("PARAM_BLOCK", p_type, p_idx, gate, qubit)
 
     gate = random.choice(CLIFFORD_GATES)
@@ -120,26 +108,29 @@ def mut_quantum_circuit(
     )
 
 
-def describe_param_genes(
-    individual: EvolutionaryIndividual,
-    max_qubits: int,
-) -> List[dict]:
+def describe_param_genes(individual: EvolutionaryIndividual) -> List[dict]:
     genes = []
     for position, gen in enumerate(individual):
         if gen[0] == "PARAM_BLOCK":
             _, p_type, p_idx, rot_gate, qubit = gen
-            entry = {
-                "position": position,
-                "type": p_type,
-                "param_idx": p_idx,
-                "gate": rot_gate,
-                "qubit": qubit,
-            }
-            if p_type == "INPUT":
-                i, j = common.pair_from_index(p_idx, max_qubits)
-                entry["linked_pair"] = [i, j]
-            genes.append(entry)
+            genes.append(
+                {
+                    "position": position,
+                    "type": p_type,
+                    "param_idx": p_idx,
+                    "gate": rot_gate,
+                    "qubit": qubit,
+                }
+            )
     return genes
+
+
+def serialize_individual(individual: EvolutionaryIndividual) -> List[list]:
+    return [list(gen) for gen in individual]
+
+
+def deserialize_individual(data: List[list]) -> EvolutionaryIndividual:
+    return [tuple(gen) for gen in data]
 
 
 def build_quantum_circuit(

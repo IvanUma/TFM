@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+import random
 import networkx as nx
 import numpy as np
 from qiskit_aer import AerSimulator
@@ -26,6 +27,12 @@ _encoding_cfg = CONFIG.get("encoding", {})
 ENABLE_INPUT_PARAMS: bool = _encoding_cfg.get("enable_input_params", False)
 PARAM_BLOCK_PROB: float = _encoding_cfg.get("param_block_prob", 0.15)
 
+_manual_input_values = _encoding_cfg.get("manual_input_values", [1.0])
+if not isinstance(_manual_input_values, list) or len(_manual_input_values) == 0:
+    raise ValueError("encoding.manual_input_values must be a non-empty list of numbers")
+MANUAL_INPUT_VALUES: List[float] = [float(v) for v in _manual_input_values]
+NUM_PARAMS: int = len(MANUAL_INPUT_VALUES)
+
 _scale_cfg = CONFIG.get("circuit_scale", {})
 MAX_QUBITS = _scale_cfg.get("max_qubits")
 if not MAX_QUBITS:
@@ -44,14 +51,15 @@ build_quantum_circuit = q_strategy.build_quantum_circuit
 get_param_indices = q_strategy.get_param_indices
 generate_guided_individual = q_strategy.generate_guided_individual
 mut_quantum_circuit = q_strategy.mut_quantum_circuit
+serialize_individual = q_strategy.serialize_individual
+deserialize_individual = q_strategy.deserialize_individual
 
 generate_heuristic_individual = common.generate_heuristic_individual
 load_external_maxcut_instance = common.load_external_maxcut_instance
 cx_quantum_circuit = common.cx_quantum_circuit
 max_cut_fitness = common.max_cut_fitness
-build_universal_input_values = common.build_universal_input_values
 
-InstanceData = Tuple[nx.Graph, float, List[float]]
+InstanceData = Tuple[nx.Graph, float]
 
 _execution_cfg = CONFIG.get("execution", {})
 _STABILIZER_THREADS: int = _execution_cfg.get("stabilizer_max_parallel_threads", 1)
@@ -128,7 +136,28 @@ def update_hof(block_gates: list) -> None:
 def describe_architecture(individual: EvolutionaryIndividual) -> dict:
     if APPROACH == "clifford":
         return {"blocks": q_strategy.describe_blocks(individual)}
-    return {"param_genes": q_strategy.describe_param_genes(individual, MAX_QUBITS)}
+    return {"param_genes": q_strategy.describe_param_genes(individual)}
+
+
+def serialize_architecture(individual: EvolutionaryIndividual) -> list:
+    return serialize_individual(individual)
+
+
+def deserialize_architecture(data: list) -> EvolutionaryIndividual:
+    return deserialize_individual(data)
+
+
+_WEIGHT_CACHE: Dict[str, np.ndarray] = {}
+
+
+def _individual_cache_key(individual: EvolutionaryIndividual) -> str:
+    parts = []
+    for gen in individual:
+        if gen[0] == "PARAM_BLOCK":
+            parts.append(f"P{gen[1]}")
+        else:
+            parts.append(str(gen[0]))
+    return "_".join(parts)
 
 
 def evaluate_circuit(
@@ -145,56 +174,109 @@ def evaluate_circuit(
     simulator = get_training_simulator()
     simulation_seconds = 0.0
 
+    use_subset = len(instances) > 3 and shots < 2048
+    subset_frac = 0.4 if use_subset else 1.0
+
     def objective(weight_vector) -> float:
         nonlocal simulation_seconds
         weight_map = dict(zip(sorted_weight_indices, weight_vector))
-        circuits = [
-            build_quantum_circuit(
-                individual, num_qubits, inst_input, weight_map, measure=True
-            )
-            for _, _, inst_input in instances
-        ]
+        qc = build_quantum_circuit(
+            individual, num_qubits, MANUAL_INPUT_VALUES, weight_map, measure=True
+        )
         sim_start = time.perf_counter()
-        results = simulator.run(circuits, shots=shots).result()
+        counts = simulator.run(qc, shots=shots).result().get_counts()
         simulation_seconds += time.perf_counter() - sim_start
 
+        if use_subset:
+            k = max(1, int(len(instances) * subset_frac))
+            subset = random.sample(instances, k)
+        else:
+            subset = instances
+
         ratios = []
-        for idx, (graph_instance, optimal_cut, _) in enumerate(instances):
-            counts = results.get_counts(idx)
+        for graph_instance, optimal_cut in subset:
             cvar_cut = max_cut_fitness(counts, graph_instance, alpha=gamma)
             ratios.append(cvar_cut / optimal_cut if optimal_cut > 0 else 0.0)
 
         return -sum(ratios) / len(ratios)
 
     if num_weights > 0:
-        maxiter = max(20, num_weights * 3)
+        maxiter = max(20, num_weights * 4)
+        cache_key = _individual_cache_key(individual) + f"_{shots}_{gamma}"
+        seed = _WEIGHT_CACHE.get(cache_key)
+        x0 = seed if seed is not None else np.random.uniform(0, 2 * np.pi, size=num_weights)
         result = minimize(
             objective,
-            x0=np.random.uniform(0, 2 * np.pi, size=num_weights),
+            x0=x0,
             method="COBYLA",
-            options={"maxiter": maxiter},
+            options={"maxiter": maxiter, "rhobeg": 0.5},
         )
         best_avg_ratio = -result.fun
         best_weights = dict(zip(sorted_weight_indices, (float(w) for w in result.x)))
+        _WEIGHT_CACHE[cache_key] = result.x.copy()
+        if len(_WEIGHT_CACHE) > 500:
+            _WEIGHT_CACHE.pop(next(iter(_WEIGHT_CACHE)))
     else:
         best_avg_ratio = -objective([])
         best_weights = {}
 
-    depths = [
-        build_quantum_circuit(
-            individual, num_qubits, inst_input, best_weights, measure=False
-        ).depth()
-        for _, _, inst_input in instances
-    ]
-    avg_depth = sum(depths) / len(depths)
+    depth = build_quantum_circuit(
+        individual, num_qubits, MANUAL_INPUT_VALUES, best_weights, measure=False
+    ).depth()
 
     hof_candidates: List[list] = []
     if best_avg_ratio > 0.8 and APPROACH == "clifford":
         hof_candidates = [gen[2] for gen in individual if gen[0] == "PARAM_BLOCK"]
 
     return (
-        (-best_avg_ratio, avg_depth),
+        (-best_avg_ratio, float(depth)),
         best_weights,
         hof_candidates,
         simulation_seconds,
     )
+
+
+def validate_circuit(
+    individual: EvolutionaryIndividual,
+    num_qubits: int,
+    validation_instances,
+    shots: int,
+    seed_weights: dict | None = None,
+) -> float:
+    _, weight_indices_set = get_param_indices(individual)
+    sorted_weight_indices = sorted(weight_indices_set)
+    num_weights = len(sorted_weight_indices)
+
+    simulator = get_training_simulator()
+
+    def objective(weight_vector) -> float:
+        weight_map = dict(zip(sorted_weight_indices, weight_vector))
+        qc = build_quantum_circuit(
+            individual, num_qubits, MANUAL_INPUT_VALUES, weight_map, measure=True
+        )
+        counts = simulator.run(qc, shots=shots).result().get_counts()
+
+        ratios = []
+        for _, graph, optimal_cut in validation_instances:
+            cut = max_cut_fitness(counts, graph, alpha=1.0)
+            ratios.append(cut / optimal_cut if optimal_cut > 0 else 0.0)
+
+        return -sum(ratios) / len(ratios)
+
+    if num_weights > 0:
+        if seed_weights is not None:
+            x0 = np.array([seed_weights.get(i, 0.0) for i in sorted_weight_indices])
+        else:
+            rng = np.random.RandomState(42)
+            x0 = rng.uniform(0, 2 * np.pi, size=num_weights)
+
+        maxiter = max(50, num_weights * 10)
+        result = minimize(
+            objective,
+            x0=x0,
+            method="COBYLA",
+            options={"maxiter": maxiter},
+        )
+        return -result.fun
+    else:
+        return -objective([])

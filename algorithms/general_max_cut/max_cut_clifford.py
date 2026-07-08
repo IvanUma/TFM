@@ -98,16 +98,9 @@ def generate_random_param_block(
     max_qubits: int,
 ) -> QuantumGen:
     block_gates = generate_random_block(num_qubits, graph_instance, max_qubits)
-    cx_gates = [g for g in block_gates if g[0] == "CX"]
-    p_idx = param_idx
-
-    if cx_gates and random.random() < 0.8:
-        u, v = cx_gates[0][1], cx_gates[0][2]
-        p_idx = common.pair_index(u, v, max_qubits)
-
     expr = gp.genHalfAndHalf(pset, min_=1, max_=4)
     tree = gp.PrimitiveTree(expr)
-    return ("PARAM_BLOCK", p_idx, block_gates, tree)
+    return ("PARAM_BLOCK", param_idx, block_gates, tree)
 
 
 def mutate_block_structure(
@@ -253,6 +246,36 @@ def describe_blocks(individual: EvolutionaryIndividual) -> List[dict]:
                 }
             )
     return blocks
+
+
+def serialize_individual(individual: EvolutionaryIndividual) -> List[dict]:
+    serialized = []
+    for gen in individual:
+        if gen[0] == "PARAM_BLOCK":
+            param_idx, block_gates, tree = gen[1], gen[2], gen[3]
+            serialized.append(
+                {
+                    "type": "PARAM_BLOCK",
+                    "param_idx": param_idx,
+                    "block_gates": [list(g) for g in block_gates],
+                    "tree": str(tree),
+                }
+            )
+        else:
+            serialized.append({"type": "GATE", "gene": list(gen)})
+    return serialized
+
+
+def deserialize_individual(data: List[dict]) -> EvolutionaryIndividual:
+    individual: EvolutionaryIndividual = []
+    for item in data:
+        if item["type"] == "PARAM_BLOCK":
+            block_gates = [tuple(g) for g in item["block_gates"]]
+            tree = gp.PrimitiveTree.from_string(item["tree"], pset)
+            individual.append(("PARAM_BLOCK", item["param_idx"], block_gates, tree))
+        else:
+            individual.append(tuple(item["gene"]))
+    return individual
 
 
 def build_quantum_circuit(
