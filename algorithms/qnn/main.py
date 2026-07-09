@@ -9,8 +9,8 @@ import subprocess
 import sys
 import time
 from datetime import datetime
-from pathlib import Path
 from multiprocessing import Pool
+from pathlib import Path
 from typing import List, Tuple
 
 import matplotlib
@@ -19,8 +19,6 @@ import numpy as np
 from deap import algorithms, base, creator, tools
 from qiskit import qpy
 from qiskit_aer import AerSimulator
-
-from timing import aggregate_simulation_seconds
 
 matplotlib.use("Agg")
 
@@ -37,185 +35,76 @@ def cpu_seconds_snapshot() -> float:
     return times.user + times.system + times.children_user + times.children_system
 
 
-def evaluate_population(individuals, toolbox, update_hof, champion_weights=None) -> Tuple[int, float]:
+def evaluate_population(individuals, toolbox, champion_weights=None) -> Tuple[int, float]:
     invalid = [ind for ind in individuals if not ind.fitness.valid]
     if not invalid:
         return 0, 0.0
-
     for ind in invalid:
         seed = getattr(ind, "stored_thetas", None) or champion_weights
         ind._seed_weights = seed
-
     results = toolbox.map(toolbox.evaluate, invalid)
     per_individual_simulation_seconds = []
-    for ind, (fit, weights, hof_candidates, simulation_seconds) in zip(
-        invalid, results
-    ):
+    for ind, (fit, weights, _, simulation_seconds) in zip(invalid, results):
         ind.fitness.values = fit
         ind.stored_thetas = weights
         del ind._seed_weights
         per_individual_simulation_seconds.append(simulation_seconds)
-        for block in hof_candidates:
-            update_hof(block)
-
-    batch_simulation_seconds = aggregate_simulation_seconds(
-        per_individual_simulation_seconds,
-        parallelize=getattr(toolbox, "parallel_evaluation", False),
+    batch_simulation_seconds = (
+        max(per_individual_simulation_seconds) if getattr(toolbox, "parallel_evaluation", False)
+        else sum(per_individual_simulation_seconds)
     )
-
     return len(invalid), batch_simulation_seconds
-
-
-def load_instance_set(
-    instances_dir: Path,
-    max_qubits: int,
-    load_external_maxcut_instance,
-    instance_qubits_filter=None,
-    max_per_size: int | None = None,
-) -> List[Tuple[str, object, float]]:
-    instance_files = sorted(p for p in instances_dir.iterdir() if p.is_file())
-    loaded = []
-    skipped_by_filter = 0
-    skipped_too_large = 0
-    skipped_by_cap = 0
-    per_size_count: dict = {}
-
-    for path in instance_files:
-        graph, num_nodes, optimal_cut = load_external_maxcut_instance(str(path))
-
-        if instance_qubits_filter is not None and num_nodes != instance_qubits_filter:
-            skipped_by_filter += 1
-            continue
-
-        if num_nodes > max_qubits:
-            skipped_too_large += 1
-            continue
-
-        if max_per_size is not None:
-            key = num_nodes
-            count = per_size_count.get(key, 0)
-            if count >= max_per_size:
-                skipped_by_cap += 1
-                continue
-            per_size_count[key] = count + 1
-
-        loaded.append((path.name, graph, optimal_cut))
-
-    if instance_qubits_filter is not None:
-        print(
-            f"[INFO] Filtered to {len(loaded)} instances with {instance_qubits_filter} nodes ({skipped_by_filter} skipped by filter)"
-        )
-    if skipped_too_large > 0:
-        print(
-            f"[INFO] Skipped {skipped_too_large} instance(s) exceeding circuit_scale.max_qubits={max_qubits}"
-        )
-    if skipped_by_cap > 0:
-        print(
-            f"[INFO] Capped at {max_per_size} per size ({skipped_by_cap} extra skipped)"
-        )
-
-    return loaded
-
-
-def split_instances(
-    instances: List[Tuple[str, object, float]], validation_fraction: float, seed: int
-) -> Tuple[List, List]:
-    rng = random.Random(seed)
-    shuffled = list(instances)
-    rng.shuffle(shuffled)
-
-    if len(shuffled) <= 1:
-        return shuffled, []
-
-    num_validation = max(1, int(len(shuffled) * validation_fraction))
-    validation = shuffled[:num_validation]
-    training = shuffled[num_validation:]
-
-    if not training:
-        training = shuffled
-        validation = []
-
-    return training, validation
 
 
 def main() -> None:
     project_root = Path(__file__).resolve().parents[2]
     sys.path.insert(0, str(project_root))
 
-    from algorithms.general_max_cut.utils import (
+    from algorithms.qnn.utils import (
         APPROACH,
         CONFIG,
         CONFIG_PATH,
+        DATASET_NAME,
         ENABLE_INPUT_PARAMS,
-        INSTANCE_QUBITS_FILTER,
         MANUAL_INPUT_VALUES,
-        MAX_INSTANCES_PER_SIZE,
-        MAX_QUBITS,
         NUM_PARAMS,
         PARAM_BLOCK_PROB,
-        SPLIT_SEED,
-        VALIDATION_FRACTION,
-        SIMULATOR_METHOD,
-        SIMULATOR_THREADS,
+        TEST_SPLIT,
         SIMULATOR_DEVICE,
         build_quantum_circuit,
         cx_quantum_circuit,
         describe_architecture,
         evaluate_circuit,
-        generate_heuristic_individual,
         generate_guided_individual,
-        load_external_maxcut_instance,
-        max_cut_fitness,
         mut_quantum_circuit,
         serialize_architecture,
-        update_hof,
     )
+    from algorithms.qnn.qnn_data import load_qnn_data
 
     if not CONFIG_PATH.exists():
         print(f"[ERROR] Config file not found: {CONFIG_PATH}")
         return
 
-    instances_dir = project_root / "max_cut_instances"
-
-    if not instances_dir.is_dir():
-        print(f"[ERROR] Instances directory not found: {instances_dir}")
-        return
-
-    all_instances = load_instance_set(
-        instances_dir,
-        MAX_QUBITS,
-        load_external_maxcut_instance,
-        instance_qubits_filter=INSTANCE_QUBITS_FILTER,
-        max_per_size=MAX_INSTANCES_PER_SIZE,
+    dataset_name = DATASET_NAME
+    X_train_enc, y_train, X_val_enc, y_val, X_test_enc, y_test, dataset_info = load_qnn_data(
+        dataset_name, test_split=TEST_SPLIT, random_state=42
     )
 
-    if not all_instances:
-        print(f"[ERROR] No instance files found in {instances_dir}")
-        return
+    circuit_qubits = dataset_info["n_qubits"]
+    n_classes = dataset_info["n_classes"]
 
-    training_instances, validation_instances = split_instances(
-        all_instances, VALIDATION_FRACTION, SPLIT_SEED
-    )
-
-    circuit_qubits = MAX_QUBITS
-    template_graph_instance = all_instances[0][1]
-    training_data = [(graph, opt) for _, graph, opt in training_instances]
-    validation_data = validation_instances
-    run_label = instances_dir.name
-    filename = instances_dir.name
+    training_data = list(zip(X_train_enc, y_train))
 
     population_config = CONFIG["population"]
     variation_config = CONFIG["variation"]
     evolution_config = CONFIG["evolution"]
-    gamma_config = CONFIG["gamma_schedule"]
     evaluation_config = CONFIG["evaluation"]
     execution_config = CONFIG.get("execution", {})
-    training_data_static = [(graph, opt) for _, graph, opt in training_instances]
+
     base_indpb = variation_config["mutation_indpb"]
     current_indpb = base_indpb
 
     toolbox.register("clone", copy.deepcopy)
-
     toolbox.register(
         "individual",
         generate_guided_individual,
@@ -224,18 +113,9 @@ def main() -> None:
             evolution_config["guided_individual_length_min"],
             circuit_qubits * evolution_config["guided_individual_length_factor"],
         ),
-        graph_instance=template_graph_instance,
         max_params=NUM_PARAMS,
         enable_input_params=ENABLE_INPUT_PARAMS,
         param_block_prob=PARAM_BLOCK_PROB,
-        max_qubits=MAX_QUBITS,
-    )
-
-    toolbox.register(
-        "individual_heuristic",
-        generate_heuristic_individual,
-        num_qubits=circuit_qubits,
-        graph_instance=template_graph_instance,
     )
 
     toolbox.register("population", tools.initRepeat, list, toolbox.individual)
@@ -244,12 +124,10 @@ def main() -> None:
         "mutate",
         mut_quantum_circuit,
         num_qubits=circuit_qubits,
-        graph_instance=template_graph_instance,
         indpb=current_indpb,
         max_params=NUM_PARAMS,
         enable_input_params=ENABLE_INPUT_PARAMS,
         param_block_prob=PARAM_BLOCK_PROB,
-        max_qubits=MAX_QUBITS,
     )
     toolbox.register("select", tools.selNSGA2)
 
@@ -265,56 +143,37 @@ def main() -> None:
     pool = Pool(processes=requested_processes) if use_multiprocessing else None
     toolbox.parallel_evaluation = pool is not None
     toolbox.register("map", pool.map if pool is not None else map)
-    simulator = AerSimulator(method=SIMULATOR_METHOD, device=SIMULATOR_DEVICE)
 
-    print("\n--- RUN CONFIGURATION ---")
-    print(f"Source: {filename}")
-    print(f"Training instances: {len(training_data)}")
-    print(f"Validation instances: {len(validation_data)}")
-    print(f"Circuit qubits: {circuit_qubits}")
+    print("\n--- QNN RUN CONFIGURATION ---")
+    print(f"Dataset: {dataset_name} ({dataset_info['n_features']} features -> {circuit_qubits} qubits, {n_classes} classes)")
+    print(f"Training samples: {dataset_info['n_train']} | Validation: {dataset_info['n_val']} | Test: {dataset_info['n_test']}")
     print(f"Input parameters: {NUM_PARAMS} {MANUAL_INPUT_VALUES}")
     print(f"Approach: {APPROACH.upper()}")
     print(f"Processes: {requested_processes if pool is not None else 1}")
-    print(
-        f"Simulator: {SIMULATOR_METHOD} on {SIMULATOR_DEVICE} (max_parallel_threads={SIMULATOR_THREADS or 'auto'})\n"
-    )
+    print(f"Simulator: statevector on {SIMULATOR_DEVICE}\n")
 
     mu = population_config["mu"]
     lambda_ = population_config["lambda"]
     population: List = []
-
-    for _ in range(int(mu * 0.2)):
-        population.append(creator.MultiIndividual(toolbox.individual_heuristic()))
-    for _ in range(mu - len(population)):
+    for _ in range(mu):
         population.append(creator.MultiIndividual(toolbox.individual()))
 
     crossover_prob = variation_config["crossover_prob"]
     mutation_prob = variation_config["mutation_prob"]
     generations = evolution_config["generations"]
-    initial_gamma = gamma_config["initial"]
-    final_gamma = gamma_config["final"]
     patience = evolution_config.get("patience", generations)
     improvement_epsilon = evolution_config.get("improvement_epsilon", 0.0)
 
     logbook = tools.Logbook()
-    logbook.header = [
-        "gen",
-        "shots",
-        "gamma",
-        "best_avg_ar",
-        "best_depth",
-        "wall_seconds",
-        "cpu_seconds",
-        "simulation_seconds",
-    ]
+    logbook.header = ["gen", "shots", "val_acc", "best_depth", "wall_seconds", "cpu_seconds", "simulation_seconds"]
 
-    stats_ar = tools.Statistics(key=lambda ind: ind.fitness.values[0])
+    stats_acc = tools.Statistics(key=lambda ind: ind.fitness.values[0])
     stats_depth = tools.Statistics(key=lambda ind: ind.fitness.values[1])
-    statistics = tools.MultiStatistics(ar=stats_ar, depth=stats_depth)
+    statistics = tools.MultiStatistics(acc=stats_acc, depth=stats_depth)
     statistics.register("min", np.min)
     statistics.register("mean", np.mean)
 
-    best_train_ar_ever = -1.0
+    best_train_acc_ever = -1.0
     absolute_champion = None
     champion_thetas = {}
     stagnant_generations = 0
@@ -327,16 +186,10 @@ def main() -> None:
         gen_start_cpu = cpu_seconds_snapshot()
         gen_simulation_seconds = 0.0
 
-        training_data = training_data_static
-
         progress = gen / (generations - 1) if generations > 1 else 1.0
         current_shots = int(
             evaluation_config["shots_start"]
-            + (evaluation_config["shots_end"] - evaluation_config["shots_start"])
-            * progress
-        )
-        current_gamma = max(
-            final_gamma, initial_gamma - (initial_gamma - final_gamma) * progress
+            + (evaluation_config["shots_end"] - evaluation_config["shots_start"]) * progress
         )
 
         toolbox.register(
@@ -346,29 +199,28 @@ def main() -> None:
                 num_qubits=circuit_qubits,
                 instances=training_data,
                 shots=current_shots,
-                gamma=current_gamma,
+                n_classes=n_classes,
+                X_val=X_val_enc,
+                y_val=y_val,
             ),
         )
 
         if gen == 0:
-            _, seconds_spent = evaluate_population(population, toolbox, update_hof)
+            _, seconds_spent = evaluate_population(population, toolbox, champion_weights=None)
             gen_simulation_seconds += seconds_spent
 
         offspring = algorithms.varOr(
             population, toolbox, lambda_, crossover_prob, mutation_prob
         )
         _, seconds_spent = evaluate_population(
-            offspring, toolbox, update_hof,
-            champion_weights=champion_thetas if absolute_champion else None,
+            offspring, toolbox, champion_weights=champion_thetas if absolute_champion else None,
         )
         gen_simulation_seconds += seconds_spent
         population[:] = toolbox.select(population + offspring, mu)
 
-        pareto_front = tools.sortNondominated(
-            population, len(population), first_front_only=True
-        )[0]
+        pareto_front = tools.sortNondominated(population, len(population), first_front_only=True)[0]
         best_individual = min(pareto_front, key=lambda ind: ind.fitness.values[0])
-        best_avg_ar = -best_individual.fitness.values[0]
+        best_acc = -best_individual.fitness.values[0]
         best_depth = best_individual.fitness.values[1]
         record = statistics.compile(population)
 
@@ -377,35 +229,20 @@ def main() -> None:
         total_simulation_seconds += gen_simulation_seconds
 
         logbook.record(
-            gen=gen,
-            shots=current_shots,
-            gamma=current_gamma,
-            best_avg_ar=best_avg_ar,
-            best_depth=best_depth,
-            wall_seconds=gen_wall_seconds,
-            cpu_seconds=gen_cpu_seconds,
-            simulation_seconds=gen_simulation_seconds,
-            **record,
+            gen=gen, shots=current_shots, best_acc=best_acc, best_depth=best_depth,
+            wall_seconds=gen_wall_seconds, cpu_seconds=gen_cpu_seconds, simulation_seconds=gen_simulation_seconds, **record,
         )
 
-        sim_share_pct = (
-            (gen_simulation_seconds / gen_wall_seconds) * 100.0
-            if gen_wall_seconds > 0.0
-            else 0.0
-        )
-        print(
-            f"Gen {gen}: Training AR = {best_avg_ar:.4f} | Depth = {best_depth:.1f} | Wall = {gen_wall_seconds:.2f}s | Sim = {gen_simulation_seconds:.2f}s ({sim_share_pct:.1f}% of wall)"
-        )
+        sim_share_pct = (gen_simulation_seconds / gen_wall_seconds) * 100.0 if gen_wall_seconds > 0 else 0.0
+        print(f"Gen {gen}: Val Acc = {best_acc:.4f} | Depth = {best_depth:.1f} | Wall = {gen_wall_seconds:.2f}s | Sim = {gen_simulation_seconds:.2f}s ({sim_share_pct:.1f}% of wall)")
 
         last_gen = gen
 
-        if best_avg_ar > best_train_ar_ever + improvement_epsilon:
-            best_train_ar_ever = best_avg_ar
+        if best_acc > best_train_acc_ever + improvement_epsilon:
+            best_train_acc_ever = best_acc
             stagnant_generations = 0
             absolute_champion = toolbox.clone(best_individual)
-            champion_thetas = copy.deepcopy(
-                getattr(best_individual, "stored_thetas", {})
-            )
+            champion_thetas = copy.deepcopy(getattr(best_individual, "stored_thetas", {}))
         else:
             stagnant_generations += 1
 
@@ -421,12 +258,10 @@ def main() -> None:
             "mutate",
             mut_quantum_circuit,
             num_qubits=circuit_qubits,
-            graph_instance=template_graph_instance,
             indpb=current_indpb,
             max_params=NUM_PARAMS,
             enable_input_params=ENABLE_INPUT_PARAMS,
             param_block_prob=PARAM_BLOCK_PROB,
-            max_qubits=MAX_QUBITS,
         )
 
     total_wall_seconds = time.perf_counter() - run_start_wall
@@ -435,96 +270,43 @@ def main() -> None:
     avg_cpu_per_gen = total_cpu_seconds / (last_gen + 1)
     avg_simulation_per_gen = total_simulation_seconds / (last_gen + 1)
 
-    total_sim_share_pct = (
-        (total_simulation_seconds / total_wall_seconds) * 100.0
-        if total_wall_seconds > 0.0
-        else 0.0
-    )
-    print(
-        f"\n[TIMING] Total: Wall = {total_wall_seconds:.2f}s | Simulation = {total_simulation_seconds:.2f}s ({total_sim_share_pct:.1f}% of wall) over {last_gen + 1} generations"
-    )
-    print(
-        f"[TIMING] Average per generation: Wall = {avg_wall_per_gen:.2f}s | Simulation = {avg_simulation_per_gen:.2f}s\n"
-    )
+    total_sim_share_pct = (total_simulation_seconds / total_wall_seconds) * 100.0 if total_wall_seconds > 0 else 0.0
+    print(f"\n[TIMING] Total: Wall = {total_wall_seconds:.2f}s | Sim = {total_simulation_seconds:.2f}s ({total_sim_share_pct:.1f}%) over {last_gen + 1} gens")
+    print(f"[TIMING] Avg/gen: Wall = {avg_wall_per_gen:.2f}s | Sim = {avg_simulation_per_gen:.2f}s\n")
 
     if pool is not None:
         pool.close()
         pool.join()
 
-    def training_instances_as_named(data):
-        return [(f"training_{i}", g, o) for i, (g, o) in enumerate(data)]
-
-    evaluation_set = validation_data
-    if evaluation_set is None or len(evaluation_set) == 0:
-        evaluation_set = training_instances_as_named(training_data)
-
     if absolute_champion is None:
-        pareto_front = tools.sortNondominated(
-            population, len(population), first_front_only=True
-        )[0]
+        pareto_front = tools.sortNondominated(population, len(population), first_front_only=True)[0]
         absolute_champion = pareto_front[0]
         champion_thetas = getattr(absolute_champion, "stored_thetas", {})
 
-    qc = build_quantum_circuit(
-        absolute_champion,
-        circuit_qubits,
-        MANUAL_INPUT_VALUES,
-        champion_thetas,
-        measure=True,
+    final_shots = evaluation_config["final_validation_shots"]
+    from algorithms.qnn.utils import validate_circuit
+    final_val_acc = validate_circuit(
+        absolute_champion, circuit_qubits, X_val_enc, y_val, final_shots, n_classes, seed_weights=champion_thetas,
     )
-    best_counts = (
-        simulator.run(qc, shots=evaluation_config["final_validation_shots"])
-        .result()
-        .get_counts()
+    final_test_acc = validate_circuit(
+        absolute_champion, circuit_qubits, X_test_enc, y_test, final_shots, n_classes, seed_weights=champion_thetas,
     )
-
-    per_instance = []
-    for name, graph, optimal_cut in evaluation_set:
-        cut = max_cut_fitness(best_counts, graph, alpha=1.0)
-        ar = cut / optimal_cut if optimal_cut > 0 else 0.0
-        per_instance.append({"instance": name, "approx_ratio": float(ar)})
-
-    best_validation_avg_ar = sum(item["approx_ratio"] for item in per_instance) / len(
-        per_instance
-    )
-    best_individual = absolute_champion
-    per_individual_reports = per_instance
 
     timestamp = datetime.now().strftime("%d%m%Y_%H%M%S")
-    output_dir = (
-        project_root
-        / "results"
-        / "general_max_cut"
-        / f"{circuit_qubits}_qubits"
-        / APPROACH
-    )
+    output_dir = project_root / "results" / "qnn" / dataset_name / APPROACH
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_stem = (
-        f"{run_label}_{circuit_qubits}q_opt_{APPROACH}_g{last_gen + 1}_{timestamp}"
-    )
-    sample_thetas = champion_thetas
+    output_stem = f"{dataset_name}_{circuit_qubits}q_{APPROACH}_g{last_gen + 1}_{timestamp}"
 
-    qc_draw = build_quantum_circuit(
-        best_individual, circuit_qubits, MANUAL_INPUT_VALUES, sample_thetas
-    )
-    qc_final = build_quantum_circuit(
-        best_individual,
-        circuit_qubits,
-        MANUAL_INPUT_VALUES,
-        sample_thetas,
-        measure=True,
-    )
+    qc_draw = build_quantum_circuit(absolute_champion, circuit_qubits, MANUAL_INPUT_VALUES, champion_thetas)
+    qc_final = build_quantum_circuit(absolute_champion, circuit_qubits, MANUAL_INPUT_VALUES, champion_thetas, measure=True)
 
     qc_draw.draw(output="mpl", filename=str(output_dir / f"{output_stem}.pdf"))
-
     with open(output_dir / f"{output_stem}.qpy", "wb") as f:
         qpy.dump(qc_final, f)
 
-    architecture = describe_architecture(best_individual)
+    architecture = describe_architecture(absolute_champion)
     if any(architecture.values()):
-        with open(
-            output_dir / f"{output_stem}_architecture.json", "w", encoding="utf-8"
-        ) as f:
+        with open(output_dir / f"{output_stem}_architecture.json", "w", encoding="utf-8") as f:
             json.dump(architecture, f, indent=4)
 
     genotype_payload = {
@@ -532,14 +314,14 @@ def main() -> None:
         "num_qubits": circuit_qubits,
         "num_params": NUM_PARAMS,
         "manual_input_values": MANUAL_INPUT_VALUES,
-        "weights": sample_thetas,
-        "genes": serialize_architecture(best_individual),
+        "weights": champion_thetas,
+        "genes": serialize_architecture(absolute_champion),
     }
     with open(output_dir / f"{output_stem}_genotype.json", "w", encoding="utf-8") as f:
         json.dump(genotype_payload, f, indent=4)
 
     generations_axis = logbook.select("gen")
-    history_ar = logbook.select("best_avg_ar")
+    history_acc = logbook.select("best_acc")
     history_depth = logbook.select("best_depth")
     history_wall_seconds = logbook.select("wall_seconds")
     history_cpu_seconds = logbook.select("cpu_seconds")
@@ -549,15 +331,15 @@ def main() -> None:
         "config": {
             "approach": APPROACH,
             "config_file": str(CONFIG_PATH),
-            "source": filename,
+            "dataset": dataset_name,
             "circuit_qubits": circuit_qubits,
-            "max_qubits": MAX_QUBITS,
+            "n_classes": n_classes,
             "num_params": NUM_PARAMS,
             "manual_input_values": MANUAL_INPUT_VALUES,
-            "simulator_method": SIMULATOR_METHOD,
             "simulator_device": SIMULATOR_DEVICE,
-            "training_instances": len(training_data),
-            "validation_instances": len(validation_data),
+            "training_samples": dataset_info["n_train"],
+            "validation_samples": dataset_info["n_val"],
+            "test_samples": dataset_info["n_test"],
             "generations_configured": generations,
             "generations_run": last_gen + 1,
             "mu": mu,
@@ -565,14 +347,13 @@ def main() -> None:
             "population": population_config,
             "variation": variation_config,
             "evolution": evolution_config,
-            "gamma_schedule": gamma_config,
             "evaluation": evaluation_config,
         },
         "results": {
-            "best_validation_avg_approx_ratio": float(best_validation_avg_ar),
-            "per_instance_validation": per_individual_reports,
+            "final_validation_accuracy": float(final_val_acc),
+            "final_test_accuracy": float(final_test_acc),
             "best_individual_depth": int(qc_draw.depth()),
-            "optimized_parameters": sample_thetas,
+            "optimized_parameters": champion_thetas,
         },
         "timing": {
             "total_wall_seconds": float(total_wall_seconds),
@@ -584,7 +365,7 @@ def main() -> None:
         },
         "history": {
             "generation": [int(g) for g in generations_axis],
-            "best_avg_ar": [float(c) for c in history_ar],
+            "best_accuracy": [float(c) for c in history_acc],
             "best_depth": [float(d) for d in history_depth],
             "wall_seconds": [float(w) for w in history_wall_seconds],
             "cpu_seconds": [float(c) for c in history_cpu_seconds],
@@ -595,36 +376,22 @@ def main() -> None:
     with open(output_dir / f"{output_stem}.json", "w", encoding="utf-8") as f:
         json.dump(output_data, f, indent=4)
 
-    print(
-        f"[VALIDATION] Final validation average approx ratio: {best_validation_avg_ar:.4f}"
-    )
-
-    print(
-        f"[SERVER INFO] Data successfully saved in '{output_dir / f'{output_stem}.json'}'"
-    )
+    print(f"\n[VALIDATION] Final val acc: {final_val_acc:.4f} | Test acc: {final_test_acc:.4f}")
+    print(f"[SAVED] {output_dir / f'{output_stem}.json'}")
 
     fig, ax1 = plt.subplots(figsize=(10, 6))
     color = "tab:blue"
     ax1.set_xlabel("Generation")
-    ax1.set_ylabel("Approx Ratio", color=color)
-    ax1.plot(generations_axis, history_ar, color=color, linewidth=2, label="AR")
+    ax1.set_ylabel("Accuracy", color=color)
+    ax1.plot(generations_axis, history_acc, color=color, linewidth=2, label="Accuracy")
     ax1.tick_params(axis="y", labelcolor=color)
     ax1.grid(True, linestyle="--", alpha=0.5)
-
     ax2 = ax1.twinx()
     color = "tab:orange"
     ax2.set_ylabel("Depth", color=color)
-    ax2.plot(
-        generations_axis,
-        history_depth,
-        color=color,
-        linestyle="--",
-        linewidth=2,
-        label="Depth",
-    )
+    ax2.plot(generations_axis, history_depth, color=color, linestyle="--", linewidth=2, label="Depth")
     ax2.tick_params(axis="y", labelcolor=color)
-
-    plt.title(f"QNAS Evolutionary Dynamics ({APPROACH.upper()}): AR vs Depth")
+    plt.title(f"QNAS Evolutionary Dynamics ({APPROACH.upper()}): Accuracy vs Depth")
     fig.tight_layout()
     plt.savefig(output_dir / f"{output_stem}.png", dpi=300)
     plt.close(fig)
@@ -651,9 +418,7 @@ if __name__ == "__main__":
             _config["approach"] = _a
             with open(_config_path, "w") as _f:
                 json.dump(_config, _f, indent=4)
-            _result = subprocess.run(
-                [sys.executable, __file__, "--internal", "--approach", _a],
-            )
+            _result = subprocess.run([sys.executable, __file__, "--internal", "--approach", _a])
             if _result.returncode != 0:
                 print(f"[ERROR] Approach {_a} failed (code {_result.returncode})")
         _config["approach"] = _orig

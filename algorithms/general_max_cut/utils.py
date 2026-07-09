@@ -23,6 +23,8 @@ with open(CONFIG_PATH, "r", encoding="utf-8") as f:
 
 APPROACH: str = CONFIG["approach"]
 
+PROBLEM_TYPE: str = CONFIG.get("problem", {}).get("type", "maxcut")
+
 _encoding_cfg = CONFIG.get("encoding", {})
 ENABLE_INPUT_PARAMS: bool = _encoding_cfg.get("enable_input_params", False)
 PARAM_BLOCK_PROB: float = _encoding_cfg.get("param_block_prob", 0.15)
@@ -38,6 +40,7 @@ MAX_QUBITS = _scale_cfg.get("max_qubits")
 if not MAX_QUBITS:
     raise ValueError("circuit_scale.max_qubits must be set for the general approach")
 INSTANCE_QUBITS_FILTER = _scale_cfg.get("instance_qubits_filter")
+MAX_INSTANCES_PER_SIZE: int | None = _scale_cfg.get("max_instances_per_size")
 
 _split_cfg = CONFIG.get("instance_split", {})
 VALIDATION_FRACTION: float = _split_cfg.get("validation_fraction", 0.2)
@@ -129,7 +132,7 @@ def update_hof(block_gates: list) -> None:
     if block_gates not in q_strategy.BLOCK_HOF:
         q_strategy.BLOCK_HOF.append(block_gates)
 
-    if len(q_strategy.BLOCK_HOF) > 50:
+    if len(q_strategy.BLOCK_HOF) > 100:
         q_strategy.BLOCK_HOF.pop(0)
 
 
@@ -147,7 +150,61 @@ def deserialize_architecture(data: list) -> EvolutionaryIndividual:
     return deserialize_individual(data)
 
 
+_QNN_TRAIN_DATA: Tuple[np.ndarray, np.ndarray] | None = None
+_QNN_VAL_DATA: Tuple[np.ndarray, np.ndarray] | None = None
+
+
+def set_qnn_data(
+    train_data: Tuple[np.ndarray, np.ndarray],
+    val_data: Tuple[np.ndarray, np.ndarray],
+) -> None:
+    global _QNN_TRAIN_DATA, _QNN_VAL_DATA
+    _QNN_TRAIN_DATA = train_data
+    _QNN_VAL_DATA = val_data
+
+
+def _qnn_classify(
+    counts: Dict[str, float],
+    n_classes: int,
+) -> int:
+    total = sum(counts.values())
+    if total == 0:
+        return 0
+    probs = {}
+    for bitstring, count in counts.items():
+        probs[int(bitstring.replace(" ", ""), 2)] = probs.get(int(bitstring.replace(" ", ""), 2), 0) + count
+    best_class = max(range(2**n_classes), key=lambda c: probs.get(c, 0))
+    return min(best_class, n_classes - 1)
+
+
+def _qnn_accuracy(
+    individual,
+    num_qubits: int,
+    X_data: np.ndarray,
+    y_data: np.ndarray,
+    weight_map: Dict[int, float],
+    shots: int,
+    n_classes: int,
+    simulator: AerSimulator,
+) -> float:
+    correct = 0
+    total = len(y_data)
+    for i in range(total):
+        state_vector = X_data[i]
+        qc = QuantumCircuit(num_qubits, num_qubits)
+        qc.initialize(state_vector, range(num_qubits))
+        circuit = build_quantum_circuit(individual, num_qubits, MANUAL_INPUT_VALUES, weight_map, measure=False)
+        qc.compose(circuit, inplace=True)
+        qc.measure_all()
+        counts = simulator.run(qc, shots=shots).result().get_counts()
+        pred = _qnn_classify(counts, n_classes)
+        if pred == y_data[i]:
+            correct += 1
+    return correct / total if total > 0 else 0.0
+
+
 _WEIGHT_CACHE: Dict[str, np.ndarray] = {}
+_CIRCUIT_CACHE: Dict[str, QuantumCircuit] = {}
 
 
 def _individual_cache_key(individual: EvolutionaryIndividual) -> str:
@@ -158,6 +215,68 @@ def _individual_cache_key(individual: EvolutionaryIndividual) -> str:
         else:
             parts.append(str(gen[0]))
     return "_".join(parts)
+
+
+def _build_param_circuit(
+    individual: EvolutionaryIndividual,
+    num_qubits: int,
+    sorted_weight_indices: List[int],
+    weight_map: Dict[int, float],
+) -> QuantumCircuit:
+    if APPROACH == "rotation":
+        from qiskit.circuit import Parameter
+        from qiskit import QuantumCircuit as QCircuit
+
+        key = _individual_cache_key(individual) + f"_{num_qubits}"
+        cached = _CIRCUIT_CACHE.get(key)
+        if cached is not None:
+            param_circuit, param_indices, param_objs = cached
+            assignments = {param_objs[i]: weight_map.get(i, 0.0) for i in param_indices}
+            return param_circuit.assign_parameters(assignments, inplace=False)
+
+        param_indices = sorted(set(sorted_weight_indices))
+        param_objs = {i: Parameter(f"w_{i}") for i in param_indices}
+        qc = QCircuit(num_qubits)
+
+        for gen in individual:
+            if gen[0] == "PARAM_BLOCK":
+                _, p_type, p_idx, rot_gate, qubit = gen
+                if p_type == "INPUT":
+                    theta = MANUAL_INPUT_VALUES[p_idx % len(MANUAL_INPUT_VALUES)] if MANUAL_INPUT_VALUES else 0.0
+                else:
+                    theta = param_objs.get(p_idx, 0.0)
+                getattr(qc, rot_gate.lower())(theta, qubit)
+            else:
+                if gen[0] == "H":
+                    qc.h(gen[1])
+                elif gen[0] == "S":
+                    qc.s(gen[1])
+                elif gen[0] == "CX":
+                    qc.cx(gen[1], gen[2])
+
+        qc.measure_all()
+        _CIRCUIT_CACHE[key] = (qc, param_indices, param_objs)
+        if len(_CIRCUIT_CACHE) > 200:
+            _CIRCUIT_CACHE.pop(next(iter(_CIRCUIT_CACHE)))
+
+        assignments = {param_objs[i]: weight_map.get(i, 0.0) for i in param_indices}
+        return qc.assign_parameters(assignments, inplace=False)
+
+    from qiskit import QuantumCircuit as QCircuit
+
+    quantized = tuple(round(weight_map.get(i, 0.0), 2) for i in sorted_weight_indices)
+    key = _individual_cache_key(individual) + f"_{num_qubits}_" + str(quantized)
+    cached = _CIRCUIT_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    qc = build_quantum_circuit(
+        individual, num_qubits, MANUAL_INPUT_VALUES, weight_map, measure=True
+    )
+    _CIRCUIT_CACHE[key] = qc
+    if len(_CIRCUIT_CACHE) > 500:
+        _CIRCUIT_CACHE.pop(next(iter(_CIRCUIT_CACHE)))
+    return qc
 
 
 def evaluate_circuit(
@@ -174,37 +293,36 @@ def evaluate_circuit(
     simulator = get_training_simulator()
     simulation_seconds = 0.0
 
-    use_subset = len(instances) > 3 and shots < 2048
-    subset_frac = 0.4 if use_subset else 1.0
-
     def objective(weight_vector) -> float:
         nonlocal simulation_seconds
         weight_map = dict(zip(sorted_weight_indices, weight_vector))
-        qc = build_quantum_circuit(
-            individual, num_qubits, MANUAL_INPUT_VALUES, weight_map, measure=True
+        qc = _build_param_circuit(
+            individual, num_qubits, sorted_weight_indices, weight_map
         )
         sim_start = time.perf_counter()
         counts = simulator.run(qc, shots=shots).result().get_counts()
         simulation_seconds += time.perf_counter() - sim_start
 
-        if use_subset:
-            k = max(1, int(len(instances) * subset_frac))
-            subset = random.sample(instances, k)
-        else:
-            subset = instances
-
         ratios = []
-        for graph_instance, optimal_cut in subset:
+        for graph_instance, optimal_cut in instances:
             cvar_cut = max_cut_fitness(counts, graph_instance, alpha=gamma)
             ratios.append(cvar_cut / optimal_cut if optimal_cut > 0 else 0.0)
 
-        return -sum(ratios) / len(ratios)
+        mean_ar = sum(ratios) / len(ratios)
+        if len(ratios) > 1:
+            std_ar = (sum((r - mean_ar) ** 2 for r in ratios) / len(ratios)) ** 0.5
+            return -(mean_ar - 0.2 * std_ar)
+        return -mean_ar
 
     if num_weights > 0:
-        maxiter = max(20, num_weights * 4)
+        maxiter = max(50, num_weights * 15)
         cache_key = _individual_cache_key(individual) + f"_{shots}_{gamma}"
-        seed = _WEIGHT_CACHE.get(cache_key)
-        x0 = seed if seed is not None else np.random.uniform(0, 2 * np.pi, size=num_weights)
+        inherited = getattr(individual, "_seed_weights", None)
+        if inherited is not None:
+            x0 = np.array([inherited.get(i, 0.0) for i in sorted_weight_indices])
+        else:
+            seed = _WEIGHT_CACHE.get(cache_key)
+            x0 = seed if seed is not None else np.random.uniform(0, 2 * np.pi, size=num_weights)
         result = minimize(
             objective,
             x0=x0,
@@ -214,7 +332,7 @@ def evaluate_circuit(
         best_avg_ratio = -result.fun
         best_weights = dict(zip(sorted_weight_indices, (float(w) for w in result.x)))
         _WEIGHT_CACHE[cache_key] = result.x.copy()
-        if len(_WEIGHT_CACHE) > 500:
+        if len(_WEIGHT_CACHE) > 2000:
             _WEIGHT_CACHE.pop(next(iter(_WEIGHT_CACHE)))
     else:
         best_avg_ratio = -objective([])
