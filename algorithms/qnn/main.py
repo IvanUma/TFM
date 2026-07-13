@@ -1,3 +1,4 @@
+# main.py
 from __future__ import annotations
 
 import copy
@@ -81,6 +82,8 @@ def main() -> None:
         generate_guided_individual,
         mut_quantum_circuit,
         serialize_architecture,
+        validate_circuit,
+        _effective_depth,
     )
     from algorithms.qnn.qnn_data import load_qnn_data
 
@@ -217,12 +220,21 @@ def main() -> None:
         )
 
         subsample_ratio = 0.3 + 0.7 * progress
-        subsample_size = max(5, int(len(training_data) * subsample_ratio))
+        total_size = len(training_data)
+        train_size = max(5, int(total_size * subsample_ratio * 0.7))
+        val_size = max(5, int(total_size * subsample_ratio * 0.3))
+
         subsample_rng = np.random.default_rng(42 + gen)
         subsample_idx = subsample_rng.choice(
-            len(training_data), size=subsample_size, replace=False
+            total_size, size=min(total_size, train_size + val_size), replace=False
         )
-        subsampled_data = [training_data[i] for i in subsample_idx]
+
+        train_idx = subsample_idx[:train_size]
+        val_idx = subsample_idx[train_size:]
+
+        subsampled_data = [training_data[i] for i in train_idx]
+        dynamic_X_val = np.array([training_data[i][0] for i in val_idx])
+        dynamic_y_val = np.array([training_data[i][1] for i in val_idx])
 
         toolbox.register(
             "evaluate",
@@ -232,8 +244,8 @@ def main() -> None:
                 instances=subsampled_data,
                 shots=current_shots,
                 n_classes=n_classes,
-                X_val=X_val_enc,
-                y_val=y_val,
+                X_val=dynamic_X_val,
+                y_val=dynamic_y_val,
             ),
         )
 
@@ -271,17 +283,27 @@ def main() -> None:
             population, len(population), first_front_only=True
         )[0]
         best_individual = min(pareto_front, key=lambda ind: ind.fitness.values[0])
-        best_acc = -best_individual.fitness.values[0]
+        best_acc_dyn = -best_individual.fitness.values[0]
         best_depth = best_individual.fitness.values[1]
         record = statistics.compile(population)
         gen_wall_seconds = time.perf_counter() - gen_start_wall
         gen_cpu_seconds = cpu_seconds_snapshot() - gen_start_cpu
         total_simulation_seconds += gen_simulation_seconds
 
+        true_val_acc = validate_circuit(
+            best_individual,
+            circuit_qubits,
+            X_val_enc,
+            y_val,
+            current_shots,
+            n_classes,
+            seed_weights=getattr(best_individual, "stored_thetas", {}),
+        )
+
         logbook.record(
             gen=gen,
             shots=current_shots,
-            best_acc=best_acc,
+            best_acc=true_val_acc,
             best_depth=best_depth,
             wall_seconds=gen_wall_seconds,
             cpu_seconds=gen_cpu_seconds,
@@ -295,13 +317,13 @@ def main() -> None:
             else 0.0
         )
         print(
-            f"Gen {gen}: Val Acc = {best_acc:.4f} | Depth = {best_depth:.1f} | Wall = {gen_wall_seconds:.2f}s | Sim = {gen_simulation_seconds:.2f}s ({sim_share_pct:.1f}% of wall)"
+            f"Gen {gen}: Dyn Val Acc = {best_acc_dyn:.4f} | True Val Acc = {true_val_acc:.4f} | Depth = {best_depth:.1f} | Wall = {gen_wall_seconds:.2f}s | Sim = {gen_simulation_seconds:.2f}s ({sim_share_pct:.1f}% of wall)"
         )
 
         last_gen = gen
 
-        if best_acc > best_train_acc_ever + improvement_epsilon:
-            best_train_acc_ever = best_acc
+        if true_val_acc > best_train_acc_ever + improvement_epsilon:
+            best_train_acc_ever = true_val_acc
             stagnant_generations = 0
             absolute_champion = toolbox.clone(best_individual)
             champion_thetas = copy.deepcopy(
@@ -366,7 +388,6 @@ def main() -> None:
         champion_thetas = getattr(absolute_champion, "stored_thetas", {})
 
     final_shots = evaluation_config["final_validation_shots"]
-    from algorithms.qnn.utils import validate_circuit, _effective_depth
 
     final_val_acc = validate_circuit(
         absolute_champion,

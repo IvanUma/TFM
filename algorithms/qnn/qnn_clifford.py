@@ -9,10 +9,14 @@ from . import qnn_common as common
 
 BLOCK_HOF: List[List[Tuple]] = []
 
-QuantumGen = Union[Tuple[str, int], Tuple[str, int, int], Tuple[str, int, List[Tuple]]]
+QuantumGen = Union[
+    Tuple[str, int], Tuple[str, int, int], Tuple[str, int, List[Tuple], int]
+]
 EvolutionaryIndividual = List[QuantumGen]
 
 CLIFFORD_GATES = ["H", "S", "CX"]
+REPS_MIN = 1
+REPS_MAX = 8
 
 
 def generate_random_gate(num_qubits: int) -> Tuple:
@@ -31,9 +35,18 @@ def generate_random_block(num_qubits: int) -> List[Tuple]:
     return common.simplify_gate_sequence(block, num_qubits)
 
 
-def generate_random_param_block(num_qubits: int, param_idx: int) -> QuantumGen:
+def generate_random_param_block(
+    num_qubits: int, param_idx: int, reps: int | None = None
+) -> QuantumGen:
     block_gates = generate_random_block(num_qubits)
-    return ("PARAM_BLOCK", param_idx, block_gates)
+    if reps is None:
+        reps = random.randint(REPS_MIN, REPS_MAX)
+    return ("PARAM_BLOCK", param_idx, block_gates, reps)
+
+
+def mutate_reps(reps: int) -> int:
+    new_reps = reps + random.choice([-1, 1])
+    return max(REPS_MIN, min(REPS_MAX, new_reps))
 
 
 def mutate_block_structure(block: List[Tuple], num_qubits: int) -> List[Tuple]:
@@ -92,15 +105,21 @@ def mut_quantum_circuit(
         if random.random() < indpb:
             gen = individual[i]
             if gen[0] == "PARAM_BLOCK":
-                param_idx, block_gates = gen[1], gen[2]
-                if random.random() < 0.5:
-                    new_block = mutate_block_structure(
-                        list(block_gates), num_qubits
-                    )
-                    individual[i] = ("PARAM_BLOCK", param_idx, new_block)
-                else:
+                param_idx, block_gates, reps = gen[1], gen[2], gen[3]
+                action_roll = random.random()
+                if action_roll < 0.34:
+                    new_block = mutate_block_structure(list(block_gates), num_qubits)
+                    individual[i] = ("PARAM_BLOCK", param_idx, new_block, reps)
+                elif action_roll < 0.67:
                     new_block = generate_random_block(num_qubits)
-                    individual[i] = ("PARAM_BLOCK", param_idx, new_block)
+                    individual[i] = ("PARAM_BLOCK", param_idx, new_block, reps)
+                else:
+                    individual[i] = (
+                        "PARAM_BLOCK",
+                        param_idx,
+                        block_gates,
+                        mutate_reps(reps),
+                    )
                 i += 1
                 continue
             action = random.choice(["INSERT", "DELETE", "REPLACE"])
@@ -133,12 +152,13 @@ def describe_blocks(individual: EvolutionaryIndividual) -> List[dict]:
     blocks = []
     for position, gen in enumerate(individual):
         if gen[0] == "PARAM_BLOCK":
-            param_idx, block_gates = gen[1], gen[2]
+            param_idx, block_gates, reps = gen[1], gen[2], gen[3]
             blocks.append(
                 {
                     "position": position,
                     "param_idx": param_idx,
                     "gate_count": len(block_gates),
+                    "reps": reps,
                     "gates": [list(g) for g in block_gates],
                 }
             )
@@ -149,12 +169,13 @@ def serialize_individual(individual: EvolutionaryIndividual) -> List[dict]:
     serialized = []
     for gen in individual:
         if gen[0] == "PARAM_BLOCK":
-            param_idx, block_gates = gen[1], gen[2]
+            param_idx, block_gates, reps = gen[1], gen[2], gen[3]
             serialized.append(
                 {
                     "type": "PARAM_BLOCK",
                     "param_idx": param_idx,
                     "block_gates": [list(g) for g in block_gates],
+                    "reps": reps,
                 }
             )
         else:
@@ -167,7 +188,8 @@ def deserialize_individual(data: List[dict]) -> EvolutionaryIndividual:
     for item in data:
         if item["type"] == "PARAM_BLOCK":
             block_gates = [tuple(g) for g in item["block_gates"]]
-            individual.append(("PARAM_BLOCK", item["param_idx"], block_gates))
+            reps = item.get("reps", 1)
+            individual.append(("PARAM_BLOCK", item["param_idx"], block_gates, reps))
         else:
             individual.append(tuple(item["gene"]))
     return individual
@@ -183,12 +205,7 @@ def build_quantum_circuit(
     qc = QuantumCircuit(num_qubits)
     for gen in individual:
         if gen[0] == "PARAM_BLOCK":
-            param_idx, block_gates = gen[1], gen[2]
-            w_val = weight_values.get(param_idx, 0.0)
-            try:
-                reps = max(1, min(int(abs(w_val)), 8))
-            except Exception:
-                reps = 1
+            param_idx, block_gates, reps = gen[1], gen[2], gen[3]
             for _ in range(reps):
                 for b_gate in block_gates:
                     if b_gate[0] == "H":

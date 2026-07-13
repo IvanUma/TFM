@@ -7,6 +7,7 @@ import numpy as np
 from sklearn.datasets import load_breast_cancer, load_iris, load_wine
 from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
 
 logger = logging.getLogger(__name__)
 
@@ -16,21 +17,18 @@ QNN_DATASETS = {
         "n_features": 4,
         "n_qubits": 4,
         "n_classes": 3,
-        "feature_indices": [0, 1, 2, 3],
     },
     "breast_cancer": {
         "loader": load_breast_cancer,
         "n_features": 30,
         "n_qubits": 5,
         "n_classes": 2,
-        "feature_indices": None,
     },
     "wine": {
         "loader": load_wine,
         "n_features": 13,
         "n_qubits": 4,
         "n_classes": 3,
-        "feature_indices": None,
     },
 }
 
@@ -38,12 +36,12 @@ _BUCKET_EDGES = [-0.67, 0.0, 0.67]
 CLIFFORD_ANGLE_LEVELS = [0.0, np.pi / 2, np.pi, 3 * np.pi / 2]
 
 
-def _amplitude_encoding(
-    features: np.ndarray, n_qubits: int, feature_indices: list | None = None
-) -> np.ndarray:
+def _amplitude_encoding(features: np.ndarray, n_qubits: int) -> np.ndarray:
+    """Codificación por amplitud estirando las características para llenar el espacio."""
+    target_size = 2**n_qubits
     n_features = features.shape[0]
-    state = np.zeros(2**n_qubits, dtype=complex)
-    state[:n_features] = features.astype(complex)
+    repeats = int(np.ceil(target_size / n_features))
+    state = np.tile(features, repeats)[:target_size].astype(complex)
     norm = np.linalg.norm(state)
     if norm > 1e-12:
         state /= norm
@@ -53,12 +51,16 @@ def _amplitude_encoding(
 
 
 def _clifford_angle_encoding(
-    features: np.ndarray, n_qubits: int, feature_indices: list | None = None
+    features: np.ndarray, n_qubits: int, bucket_edges: np.ndarray | None = None
 ) -> np.ndarray:
-    idx = feature_indices if feature_indices is not None else list(range(n_qubits))
-    selected = features[idx]
-    buckets = np.digitize(selected, bins=_BUCKET_EDGES)
-    return buckets.astype(np.int64)
+    if bucket_edges is not None:
+        buckets = np.zeros(n_qubits, dtype=np.int64)
+        for i in range(n_qubits):
+            buckets[i] = np.digitize(features[i], bins=bucket_edges[i])
+        return buckets
+    else:
+        buckets = np.digitize(features[:n_qubits], bins=_BUCKET_EDGES)
+        return buckets.astype(np.int64)
 
 
 def load_qnn_data(
@@ -101,15 +103,28 @@ def load_qnn_data(
     y_train2, y_val = y_train[train_idx2], y_train[val_idx]
 
     n_qubits = info["n_qubits"]
-    feature_indices = info.get("feature_indices")
-    encode = (
-        _clifford_angle_encoding
-        if encoding_mode == "clifford_angle"
-        else _amplitude_encoding
-    )
-    X_train_enc = np.array([encode(x, n_qubits, feature_indices) for x in X_train])
-    X_val_enc = np.array([encode(x, n_qubits, feature_indices) for x in X_val])
-    X_test_enc = np.array([encode(x, n_qubits, feature_indices) for x in X_test_raw])
+
+    pca = PCA(n_components=n_qubits, random_state=random_state)
+    X_train_pca = pca.fit_transform(X_train)
+    X_val_pca = pca.transform(X_val)
+    X_test_pca = pca.transform(X_test_raw)
+
+    if encoding_mode == "clifford_angle":
+        bucket_edges = np.percentile(X_train_pca, [25, 50, 75], axis=0).T
+
+        X_train_enc = np.array(
+            [_clifford_angle_encoding(x, n_qubits, bucket_edges) for x in X_train_pca]
+        )
+        X_val_enc = np.array(
+            [_clifford_angle_encoding(x, n_qubits, bucket_edges) for x in X_val_pca]
+        )
+        X_test_enc = np.array(
+            [_clifford_angle_encoding(x, n_qubits, bucket_edges) for x in X_test_pca]
+        )
+    else:
+        X_train_enc = np.array([_amplitude_encoding(x, n_qubits) for x in X_train_pca])
+        X_val_enc = np.array([_amplitude_encoding(x, n_qubits) for x in X_val_pca])
+        X_test_enc = np.array([_amplitude_encoding(x, n_qubits) for x in X_test_pca])
 
     dataset_info = {
         "name": dataset_name,
@@ -123,7 +138,7 @@ def load_qnn_data(
     }
 
     logger.info(
-        "Loaded %s: %d train, %d val, %d test, %d features -> %d qubits, %d classes (encoding=%s)",
+        "Loaded %s: %d train, %d val, %d test, PCA %d -> %d qubits, %d classes (encoding=%s)",
         dataset_name,
         X_train.shape[0],
         X_val.shape[0],
