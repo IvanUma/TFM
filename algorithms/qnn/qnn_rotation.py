@@ -42,8 +42,8 @@ def generate_guided_individual(
     param_block_prob: float = 0.15,
     **ignored,
 ) -> EvolutionaryIndividual:
-    individual = [("H", i) for i in range(num_qubits)]
-    remaining_length = max(0, length - num_qubits)
+    individual = [("H", q) for q in range(num_qubits) if random.random() < 0.5]
+    remaining_length = max(0, length - len(individual))
     for _ in range(remaining_length):
         individual.append(generate_random_gate(num_qubits, max_params=max_params, enable_input_params=enable_input_params, param_block_prob=param_block_prob))
     return individual

@@ -10,7 +10,7 @@ import networkx as nx
 from deap import gp
 from qiskit import QuantumCircuit
 
-from . import max_cut_common as common
+import max_cut_common as common
 
 BLOCK_HOF: List[List[Tuple]] = []
 

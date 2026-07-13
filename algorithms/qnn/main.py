@@ -4,7 +4,6 @@ import copy
 import functools
 import json
 import os
-import random
 import subprocess
 import sys
 import time
@@ -18,7 +17,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 from deap import algorithms, base, creator, tools
 from qiskit import qpy
-from qiskit_aer import AerSimulator
 
 matplotlib.use("Agg")
 
@@ -35,13 +33,17 @@ def cpu_seconds_snapshot() -> float:
     return times.user + times.system + times.children_user + times.children_system
 
 
-def evaluate_population(individuals, toolbox, champion_weights=None) -> Tuple[int, float]:
+def evaluate_population(
+    individuals, toolbox, champion_weights=None
+) -> Tuple[int, float]:
     invalid = [ind for ind in individuals if not ind.fitness.valid]
     if not invalid:
         return 0, 0.0
     for ind in invalid:
-        seed = getattr(ind, "stored_thetas", None) or champion_weights
-        ind._seed_weights = seed
+        own_weights = getattr(ind, "stored_thetas", None) or {}
+        champion = champion_weights or {}
+        merged_seed = {**champion, **own_weights}
+        ind._seed_weights = merged_seed if merged_seed else None
     results = toolbox.map(toolbox.evaluate, invalid)
     per_individual_simulation_seconds = []
     for ind, (fit, weights, _, simulation_seconds) in zip(invalid, results):
@@ -50,7 +52,8 @@ def evaluate_population(individuals, toolbox, champion_weights=None) -> Tuple[in
         del ind._seed_weights
         per_individual_simulation_seconds.append(simulation_seconds)
     batch_simulation_seconds = (
-        max(per_individual_simulation_seconds) if getattr(toolbox, "parallel_evaluation", False)
+        max(per_individual_simulation_seconds)
+        if getattr(toolbox, "parallel_evaluation", False)
         else sum(per_individual_simulation_seconds)
     )
     return len(invalid), batch_simulation_seconds
@@ -86,8 +89,14 @@ def main() -> None:
         return
 
     dataset_name = DATASET_NAME
-    X_train_enc, y_train, X_val_enc, y_val, X_test_enc, y_test, dataset_info = load_qnn_data(
-        dataset_name, test_split=TEST_SPLIT, random_state=42
+    encoding_mode = "clifford_angle" if APPROACH == "clifford" else "amplitude"
+    X_train_enc, y_train, X_val_enc, y_val, X_test_enc, y_test, dataset_info = (
+        load_qnn_data(
+            dataset_name,
+            test_split=TEST_SPLIT,
+            random_state=42,
+            encoding_mode=encoding_mode,
+        )
     )
 
     circuit_qubits = dataset_info["n_qubits"]
@@ -145,12 +154,18 @@ def main() -> None:
     toolbox.register("map", pool.map if pool is not None else map)
 
     print("\n--- QNN RUN CONFIGURATION ---")
-    print(f"Dataset: {dataset_name} ({dataset_info['n_features']} features -> {circuit_qubits} qubits, {n_classes} classes)")
-    print(f"Training samples: {dataset_info['n_train']} | Validation: {dataset_info['n_val']} | Test: {dataset_info['n_test']}")
+    print(
+        f"Dataset: {dataset_name} ({dataset_info['n_features']} features -> {circuit_qubits} qubits, {n_classes} classes)"
+    )
+    print(
+        f"Training samples: {dataset_info['n_train']} | Validation: {dataset_info['n_val']} | Test: {dataset_info['n_test']}"
+    )
+    print(f"Encoding mode: {encoding_mode}")
     print(f"Input parameters: {NUM_PARAMS} {MANUAL_INPUT_VALUES}")
     print(f"Approach: {APPROACH.upper()}")
     print(f"Processes: {requested_processes if pool is not None else 1}")
-    print(f"Simulator: statevector on {SIMULATOR_DEVICE}\n")
+    sim_method = "stabilizer" if APPROACH == "clifford" else "statevector"
+    print(f"Simulator: {sim_method} on {SIMULATOR_DEVICE}\n")
 
     mu = population_config["mu"]
     lambda_ = population_config["lambda"]
@@ -165,7 +180,15 @@ def main() -> None:
     improvement_epsilon = evolution_config.get("improvement_epsilon", 0.0)
 
     logbook = tools.Logbook()
-    logbook.header = ["gen", "shots", "val_acc", "best_depth", "wall_seconds", "cpu_seconds", "simulation_seconds"]
+    logbook.header = [
+        "gen",
+        "shots",
+        "val_acc",
+        "best_depth",
+        "wall_seconds",
+        "cpu_seconds",
+        "simulation_seconds",
+    ]
 
     stats_acc = tools.Statistics(key=lambda ind: ind.fitness.values[0])
     stats_depth = tools.Statistics(key=lambda ind: ind.fitness.values[1])
@@ -189,15 +212,24 @@ def main() -> None:
         progress = gen / (generations - 1) if generations > 1 else 1.0
         current_shots = int(
             evaluation_config["shots_start"]
-            + (evaluation_config["shots_end"] - evaluation_config["shots_start"]) * progress
+            + (evaluation_config["shots_end"] - evaluation_config["shots_start"])
+            * progress
         )
+
+        subsample_ratio = 0.3 + 0.7 * progress
+        subsample_size = max(5, int(len(training_data) * subsample_ratio))
+        subsample_rng = np.random.default_rng(42 + gen)
+        subsample_idx = subsample_rng.choice(
+            len(training_data), size=subsample_size, replace=False
+        )
+        subsampled_data = [training_data[i] for i in subsample_idx]
 
         toolbox.register(
             "evaluate",
             functools.partial(
                 evaluate_circuit,
                 num_qubits=circuit_qubits,
-                instances=training_data,
+                instances=subsampled_data,
                 shots=current_shots,
                 n_classes=n_classes,
                 X_val=X_val_enc,
@@ -206,35 +238,65 @@ def main() -> None:
         )
 
         if gen == 0:
-            _, seconds_spent = evaluate_population(population, toolbox, champion_weights=None)
+            _, seconds_spent = evaluate_population(
+                population, toolbox, champion_weights=None
+            )
             gen_simulation_seconds += seconds_spent
 
         offspring = algorithms.varOr(
             population, toolbox, lambda_, crossover_prob, mutation_prob
         )
         _, seconds_spent = evaluate_population(
-            offspring, toolbox, champion_weights=champion_thetas if absolute_champion else None,
+            offspring,
+            toolbox,
+            champion_weights=champion_thetas if absolute_champion else None,
         )
         gen_simulation_seconds += seconds_spent
+
+        if stagnant_generations > patience // 2:
+            n_immigrants = max(1, mu // 10)
+            immigrants = [
+                creator.MultiIndividual(toolbox.individual())
+                for _ in range(n_immigrants)
+            ]
+            _, immigrant_seconds = evaluate_population(
+                immigrants, toolbox, champion_weights=None
+            )
+            gen_simulation_seconds += immigrant_seconds
+            offspring = offspring + immigrants
+
         population[:] = toolbox.select(population + offspring, mu)
 
-        pareto_front = tools.sortNondominated(population, len(population), first_front_only=True)[0]
+        pareto_front = tools.sortNondominated(
+            population, len(population), first_front_only=True
+        )[0]
         best_individual = min(pareto_front, key=lambda ind: ind.fitness.values[0])
         best_acc = -best_individual.fitness.values[0]
         best_depth = best_individual.fitness.values[1]
         record = statistics.compile(population)
-
         gen_wall_seconds = time.perf_counter() - gen_start_wall
         gen_cpu_seconds = cpu_seconds_snapshot() - gen_start_cpu
         total_simulation_seconds += gen_simulation_seconds
 
         logbook.record(
-            gen=gen, shots=current_shots, best_acc=best_acc, best_depth=best_depth,
-            wall_seconds=gen_wall_seconds, cpu_seconds=gen_cpu_seconds, simulation_seconds=gen_simulation_seconds, **record,
+            gen=gen,
+            shots=current_shots,
+            best_acc=best_acc,
+            best_depth=best_depth,
+            wall_seconds=gen_wall_seconds,
+            cpu_seconds=gen_cpu_seconds,
+            simulation_seconds=gen_simulation_seconds,
+            **record,
         )
 
-        sim_share_pct = (gen_simulation_seconds / gen_wall_seconds) * 100.0 if gen_wall_seconds > 0 else 0.0
-        print(f"Gen {gen}: Val Acc = {best_acc:.4f} | Depth = {best_depth:.1f} | Wall = {gen_wall_seconds:.2f}s | Sim = {gen_simulation_seconds:.2f}s ({sim_share_pct:.1f}% of wall)")
+        sim_share_pct = (
+            (gen_simulation_seconds / gen_wall_seconds) * 100.0
+            if gen_wall_seconds > 0
+            else 0.0
+        )
+        print(
+            f"Gen {gen}: Val Acc = {best_acc:.4f} | Depth = {best_depth:.1f} | Wall = {gen_wall_seconds:.2f}s | Sim = {gen_simulation_seconds:.2f}s ({sim_share_pct:.1f}% of wall)"
+        )
 
         last_gen = gen
 
@@ -242,7 +304,15 @@ def main() -> None:
             best_train_acc_ever = best_acc
             stagnant_generations = 0
             absolute_champion = toolbox.clone(best_individual)
-            champion_thetas = copy.deepcopy(getattr(best_individual, "stored_thetas", {}))
+            champion_thetas = copy.deepcopy(
+                getattr(best_individual, "stored_thetas", {})
+            )
+            if APPROACH == "clifford":
+                from algorithms.qnn.utils import update_hof
+
+                for block_gene in best_individual:
+                    if block_gene[0] == "PARAM_BLOCK":
+                        update_hof(block_gene[2])
         else:
             stagnant_generations += 1
 
@@ -251,7 +321,9 @@ def main() -> None:
             break
 
         if stagnant_generations > patience // 3:
-            current_indpb = min(0.3, base_indpb * (1.0 + 0.5 * stagnant_generations / patience))
+            current_indpb = min(
+                0.3, base_indpb * (1.0 + 0.5 * stagnant_generations / patience)
+            )
         else:
             current_indpb = base_indpb
         toolbox.register(
@@ -270,35 +342,68 @@ def main() -> None:
     avg_cpu_per_gen = total_cpu_seconds / (last_gen + 1)
     avg_simulation_per_gen = total_simulation_seconds / (last_gen + 1)
 
-    total_sim_share_pct = (total_simulation_seconds / total_wall_seconds) * 100.0 if total_wall_seconds > 0 else 0.0
-    print(f"\n[TIMING] Total: Wall = {total_wall_seconds:.2f}s | Sim = {total_simulation_seconds:.2f}s ({total_sim_share_pct:.1f}%) over {last_gen + 1} gens")
-    print(f"[TIMING] Avg/gen: Wall = {avg_wall_per_gen:.2f}s | Sim = {avg_simulation_per_gen:.2f}s\n")
+    total_sim_share_pct = (
+        (total_simulation_seconds / total_wall_seconds) * 100.0
+        if total_wall_seconds > 0
+        else 0.0
+    )
+    print(
+        f"\n[TIMING] Total: Wall = {total_wall_seconds:.2f}s | Sim = {total_simulation_seconds:.2f}s ({total_sim_share_pct:.1f}%) over {last_gen + 1} gens"
+    )
+    print(
+        f"[TIMING] Avg/gen: Wall = {avg_wall_per_gen:.2f}s | Sim = {avg_simulation_per_gen:.2f}s\n"
+    )
 
     if pool is not None:
         pool.close()
         pool.join()
 
     if absolute_champion is None:
-        pareto_front = tools.sortNondominated(population, len(population), first_front_only=True)[0]
+        pareto_front = tools.sortNondominated(
+            population, len(population), first_front_only=True
+        )[0]
         absolute_champion = pareto_front[0]
         champion_thetas = getattr(absolute_champion, "stored_thetas", {})
 
     final_shots = evaluation_config["final_validation_shots"]
-    from algorithms.qnn.utils import validate_circuit
+    from algorithms.qnn.utils import validate_circuit, _effective_depth
+
     final_val_acc = validate_circuit(
-        absolute_champion, circuit_qubits, X_val_enc, y_val, final_shots, n_classes, seed_weights=champion_thetas,
+        absolute_champion,
+        circuit_qubits,
+        X_val_enc,
+        y_val,
+        final_shots,
+        n_classes,
+        seed_weights=champion_thetas,
     )
     final_test_acc = validate_circuit(
-        absolute_champion, circuit_qubits, X_test_enc, y_test, final_shots, n_classes, seed_weights=champion_thetas,
+        absolute_champion,
+        circuit_qubits,
+        X_test_enc,
+        y_test,
+        final_shots,
+        n_classes,
+        seed_weights=champion_thetas,
     )
 
     timestamp = datetime.now().strftime("%d%m%Y_%H%M%S")
     output_dir = project_root / "results" / "qnn" / dataset_name / APPROACH
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_stem = f"{dataset_name}_{circuit_qubits}q_{APPROACH}_g{last_gen + 1}_{timestamp}"
+    output_stem = (
+        f"{dataset_name}_{circuit_qubits}q_{APPROACH}_g{last_gen + 1}_{timestamp}"
+    )
 
-    qc_draw = build_quantum_circuit(absolute_champion, circuit_qubits, MANUAL_INPUT_VALUES, champion_thetas)
-    qc_final = build_quantum_circuit(absolute_champion, circuit_qubits, MANUAL_INPUT_VALUES, champion_thetas, measure=True)
+    qc_draw = build_quantum_circuit(
+        absolute_champion, circuit_qubits, MANUAL_INPUT_VALUES, champion_thetas
+    )
+    qc_final = build_quantum_circuit(
+        absolute_champion,
+        circuit_qubits,
+        MANUAL_INPUT_VALUES,
+        champion_thetas,
+        measure=True,
+    )
 
     qc_draw.draw(output="mpl", filename=str(output_dir / f"{output_stem}.pdf"))
     with open(output_dir / f"{output_stem}.qpy", "wb") as f:
@@ -306,7 +411,9 @@ def main() -> None:
 
     architecture = describe_architecture(absolute_champion)
     if any(architecture.values()):
-        with open(output_dir / f"{output_stem}_architecture.json", "w", encoding="utf-8") as f:
+        with open(
+            output_dir / f"{output_stem}_architecture.json", "w", encoding="utf-8"
+        ) as f:
             json.dump(architecture, f, indent=4)
 
     genotype_payload = {
@@ -332,6 +439,7 @@ def main() -> None:
             "approach": APPROACH,
             "config_file": str(CONFIG_PATH),
             "dataset": dataset_name,
+            "encoding_mode": encoding_mode,
             "circuit_qubits": circuit_qubits,
             "n_classes": n_classes,
             "num_params": NUM_PARAMS,
@@ -352,7 +460,7 @@ def main() -> None:
         "results": {
             "final_validation_accuracy": float(final_val_acc),
             "final_test_accuracy": float(final_test_acc),
-            "best_individual_depth": int(qc_draw.depth()),
+            "best_individual_depth": int(_effective_depth(qc_draw)),
             "optimized_parameters": champion_thetas,
         },
         "timing": {
@@ -376,7 +484,9 @@ def main() -> None:
     with open(output_dir / f"{output_stem}.json", "w", encoding="utf-8") as f:
         json.dump(output_data, f, indent=4)
 
-    print(f"\n[VALIDATION] Final val acc: {final_val_acc:.4f} | Test acc: {final_test_acc:.4f}")
+    print(
+        f"\n[VALIDATION] Final val acc: {final_val_acc:.4f} | Test acc: {final_test_acc:.4f}"
+    )
     print(f"[SAVED] {output_dir / f'{output_stem}.json'}")
 
     fig, ax1 = plt.subplots(figsize=(10, 6))
@@ -389,7 +499,14 @@ def main() -> None:
     ax2 = ax1.twinx()
     color = "tab:orange"
     ax2.set_ylabel("Depth", color=color)
-    ax2.plot(generations_axis, history_depth, color=color, linestyle="--", linewidth=2, label="Depth")
+    ax2.plot(
+        generations_axis,
+        history_depth,
+        color=color,
+        linestyle="--",
+        linewidth=2,
+        label="Depth",
+    )
     ax2.tick_params(axis="y", labelcolor=color)
     plt.title(f"QNAS Evolutionary Dynamics ({APPROACH.upper()}): Accuracy vs Depth")
     fig.tight_layout()
@@ -399,36 +516,66 @@ def main() -> None:
 
 if __name__ == "__main__":
     import argparse as _argparse
+
     _parser = _argparse.ArgumentParser()
     _parser.add_argument("--approach", type=str, default=None)
+    _parser.add_argument("--dataset", type=str, default=None)
     _args, _ = _parser.parse_known_args()
 
     _config_path = Path(__file__).parent / "config.json"
-    with open(_config_path) as _f:
+    with open(_config_path, encoding="utf-8") as _f:
         _config = json.load(_f)
 
-    _approaches = _config.pop("approaches", None)
+    _approaches = _config.get("approaches", None)
+    _datasets = _config.get("qnn", {}).get("datasets_to_run", None)
 
-    if _approaches and len(_approaches) > 1 and "--internal" not in sys.argv:
-        _orig = _config.get("approach", _approaches[0])
-        for _a in _approaches:
-            print(f"\n{'='*60}")
-            print(f"  Running approach: {_a}")
-            print(f"{'='*60}\n")
-            _config["approach"] = _a
-            with open(_config_path, "w") as _f:
-                json.dump(_config, _f, indent=4)
-            _result = subprocess.run([sys.executable, __file__, "--internal", "--approach", _a])
-            if _result.returncode != 0:
-                print(f"[ERROR] Approach {_a} failed (code {_result.returncode})")
-        _config["approach"] = _orig
-        with open(_config_path, "w") as _f:
+    if _args.approach:
+        with open(_config_path, encoding="utf-8") as _f:
+            _config = json.load(_f)
+        _config["approach"] = _args.approach
+        with open(_config_path, "w", encoding="utf-8") as _f:
             json.dump(_config, _f, indent=4)
+
+    if _args.dataset:
+        with open(_config_path, encoding="utf-8") as _f:
+            _config = json.load(_f)
+        _config["qnn"]["dataset"] = _args.dataset
+        with open(_config_path, "w", encoding="utf-8") as _f:
+            json.dump(_config, _f, indent=4)
+
+    _run_multi = (
+        (_approaches and len(_approaches) > 1) or (_datasets and len(_datasets) > 1)
+    ) and "--internal" not in sys.argv
+
+    if _run_multi:
+        _orig_approach = _config.get("approach", (_approaches or ["clifford"])[0])
+        _orig_dataset = _config.get("qnn", {}).get(
+            "dataset", (_datasets or ["iris"])[0]
+        )
+
+        _dataset_list = _datasets if _datasets else [_orig_dataset]
+        _approach_list = _approaches if _approaches else [_orig_approach]
+
+        for _ds in _dataset_list:
+            for _a in _approach_list:
+                print(f"\n{'=' * 60}")
+                print(f"  Dataset: {_ds} | Approach: {_a}")
+                print(f"{'=' * 60}\n")
+                _config_single = dict(_config)
+                _config_single["approach"] = _a
+                _config_single["qnn"] = dict(_config["qnn"], dataset=_ds)
+                with open(_config_path, "w", encoding="utf-8") as _f:
+                    json.dump(_config_single, _f, indent=4)
+                _result = subprocess.run([sys.executable, __file__, "--internal"])
+                if _result.returncode != 0:
+                    print(
+                        f"[ERROR] Dataset {_ds} / Approach {_a} failed (code {_result.returncode})"
+                    )
+
+        _config_single = dict(_config)
+        _config_single["approach"] = _orig_approach
+        _config_single["qnn"] = dict(_config["qnn"], dataset=_orig_dataset)
+        with open(_config_path, "w", encoding="utf-8") as _f:
+            json.dump(_config_single, _f, indent=4)
     else:
-        if _args.approach:
-            with open(_config_path) as _f:
-                _config_single = json.load(_f)
-            _config_single["approach"] = _args.approach
-            with open(_config_path, "w") as _f:
-                json.dump(_config_single, _f, indent=4)
         main()

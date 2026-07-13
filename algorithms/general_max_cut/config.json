@@ -1,8 +1,12 @@
 {
     "approach": "clifford",
+    "approaches": [
+        "rotation",
+        "clifford"
+    ],
     "population": {
-        "mu": 80,
-        "lambda": 40
+        "mu": 50,
+        "lambda": 30
     },
     "variation": {
         "crossover_prob": 0.75,

@@ -37,7 +37,9 @@ def cpu_seconds_snapshot() -> float:
     return times.user + times.system + times.children_user + times.children_system
 
 
-def evaluate_population(individuals, toolbox, update_hof, champion_weights=None) -> Tuple[int, float]:
+def evaluate_population(
+    individuals, toolbox, update_hof, champion_weights=None
+) -> Tuple[int, float]:
     invalid = [ind for ind in individuals if not ind.fitness.valid]
     if not invalid:
         return 0, 0.0
@@ -358,7 +360,9 @@ def main() -> None:
             population, toolbox, lambda_, crossover_prob, mutation_prob
         )
         _, seconds_spent = evaluate_population(
-            offspring, toolbox, update_hof,
+            offspring,
+            toolbox,
+            update_hof,
             champion_weights=champion_thetas if absolute_champion else None,
         )
         gen_simulation_seconds += seconds_spent
@@ -414,7 +418,9 @@ def main() -> None:
             break
 
         if stagnant_generations > patience // 3:
-            current_indpb = min(0.3, base_indpb * (1.0 + 0.5 * stagnant_generations / patience))
+            current_indpb = min(
+                0.3, base_indpb * (1.0 + 0.5 * stagnant_generations / patience)
+            )
         else:
             current_indpb = base_indpb
         toolbox.register(
@@ -632,38 +638,41 @@ def main() -> None:
 
 if __name__ == "__main__":
     import argparse as _argparse
+
     _parser = _argparse.ArgumentParser()
     _parser.add_argument("--approach", type=str, default=None)
     _args, _ = _parser.parse_known_args()
 
     _config_path = Path(__file__).parent / "config.json"
-    with open(_config_path) as _f:
+    with open(_config_path, encoding="utf-8") as _f:
         _config = json.load(_f)
 
-    _approaches = _config.pop("approaches", None)
+    _approaches = _config.get("approaches", None)
 
     if _approaches and len(_approaches) > 1 and "--internal" not in sys.argv:
         _orig = _config.get("approach", _approaches[0])
         for _a in _approaches:
-            print(f"\n{'='*60}")
+            print(f"\n{'=' * 60}")
             print(f"  Running approach: {_a}")
-            print(f"{'='*60}\n")
-            _config["approach"] = _a
-            with open(_config_path, "w") as _f:
-                json.dump(_config, _f, indent=4)
+            print(f"{'=' * 60}\n")
+            _config_single = dict(_config)
+            _config_single["approach"] = _a
+            with open(_config_path, "w", encoding="utf-8") as _f:
+                json.dump(_config_single, _f, indent=4)
             _result = subprocess.run(
                 [sys.executable, __file__, "--internal", "--approach", _a],
             )
             if _result.returncode != 0:
                 print(f"[ERROR] Approach {_a} failed (code {_result.returncode})")
-        _config["approach"] = _orig
-        with open(_config_path, "w") as _f:
-            json.dump(_config, _f, indent=4)
+        _config_single = dict(_config)
+        _config_single["approach"] = _orig
+        with open(_config_path, "w", encoding="utf-8") as _f:
+            json.dump(_config_single, _f, indent=4)
     else:
         if _args.approach:
-            with open(_config_path) as _f:
+            with open(_config_path, encoding="utf-8") as _f:
                 _config_single = json.load(_f)
             _config_single["approach"] = _args.approach
-            with open(_config_path, "w") as _f:
+            with open(_config_path, "w", encoding="utf-8") as _f:
                 json.dump(_config_single, _f, indent=4)
         main()

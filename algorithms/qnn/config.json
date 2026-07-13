@@ -1,12 +1,18 @@
 {
     "approach": "clifford",
+    "random_seed": 42,
     "qnn": {
         "dataset": "iris",
+        "datasets_to_run": [
+            "iris",
+            "breast_cancer",
+            "wine"
+        ],
         "test_split": 0.2
     },
     "population": {
-        "mu": 50,
-        "lambda": 30
+        "mu": 70,
+        "lambda": 50
     },
     "variation": {
         "crossover_prob": 0.75,
@@ -14,10 +20,10 @@
         "mutation_indpb": 0.25
     },
     "evolution": {
-        "generations": 50,
+        "generations": 150,
         "guided_individual_length_min": 10,
         "guided_individual_length_factor": 2,
-        "patience": 20,
+        "patience": 30,
         "patience_window": 10,
         "improvement_epsilon": 0.005
     },
@@ -25,11 +31,11 @@
         "shots_start": 1024,
         "shots_end": 4096,
         "final_validation_shots": 8192,
-        "cobyla_maxiter_factor": 15
+        "cobyla_maxiter_factor": 8
     },
     "encoding": {
         "enable_input_params": true,
-        "param_block_prob": 0.15,
+        "param_block_prob": 0.5,
         "manual_input_values": [
             0.5,
             1.0,
@@ -39,12 +45,14 @@
             3.0
         ]
     },
-    "approaches": ["clifford", "rotation"],
+    "approaches": [
+        "clifford",
+        "rotation"
+    ],
     "execution": {
         "multiprocessing": false,
         "processes": null,
         "device": "auto",
-        "stabilizer_max_parallel_threads": 1,
         "statevector_max_parallel_threads": 1
     }
 }

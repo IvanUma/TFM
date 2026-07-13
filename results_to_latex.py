@@ -53,6 +53,7 @@ def config_summary_table(data: dict, label_suffix: str) -> str:
 
 def results_table(data: dict, label_suffix: str) -> str:
     res = data["results"]
+    timing = data["timing"]
     lines = [
         r"\begin{table}[htbp]",
         r"\centering",
@@ -60,8 +61,9 @@ def results_table(data: dict, label_suffix: str) -> str:
         r"\toprule",
         r"Métrica & Valor \\",
         r"\midrule",
-        f"Approx.\\ ratio medio (validación) & {res['best_validation_avg_approx_ratio']:.4f} \\\\",
+        f"Approx.\\ ratio medio (validación) & {res['best_validation_avg_approx_ratio']:.6f} \\\\",
         f"Profundidad del mejor individuo & {res['best_individual_depth']} \\\\",
+        f"Tiempo total de simulación (s) & {timing['total_simulation_seconds']:.4f} \\\\",
         r"\bottomrule",
         r"\end{tabular}",
         f"\\caption{{Resultados de validación ({escape_latex(data['config']['approach'])})}}",
@@ -77,7 +79,7 @@ def per_instance_table(data: dict, label_suffix: str) -> str:
         return ""
 
     rows = "\n".join(
-        f"{escape_latex(item['instance'])} & {item['approx_ratio']:.4f} \\\\"
+        f"{escape_latex(item['instance'])} & {item['approx_ratio']:.6f} \\\\"
         for item in per_instance
     )
     lines = [
@@ -106,12 +108,12 @@ def timing_table(data: dict, label_suffix: str) -> str:
         r"\toprule",
         r"Métrica de tiempo & Segundos \\",
         r"\midrule",
-        f"Total (reloj) & {timing['total_wall_seconds']:.2f} \\\\",
-        f"Total (CPU) & {timing['total_cpu_seconds']:.2f} \\\\",
-        f"Total (simulación pura) & {timing['total_simulation_seconds']:.2f} \\\\",
-        f"Media por generación (reloj) & {timing['avg_wall_seconds_per_generation']:.2f} \\\\",
-        f"Media por generación (CPU) & {timing['avg_cpu_seconds_per_generation']:.2f} \\\\",
-        f"Media por generación (simulación pura) & {timing['avg_simulation_seconds_per_generation']:.2f} \\\\",
+        f"Total (reloj) & {timing['total_wall_seconds']:.4f} \\\\",
+        f"Total (CPU) & {timing['total_cpu_seconds']:.4f} \\\\",
+        f"Total (simulación pura) & {timing['total_simulation_seconds']:.4f} \\\\",
+        f"Media por generación (reloj) & {timing['avg_wall_seconds_per_generation']:.4f} \\\\",
+        f"Media por generación (CPU) & {timing['avg_cpu_seconds_per_generation']:.4f} \\\\",
+        f"Media por generación (simulación pura) & {timing['avg_simulation_seconds_per_generation']:.4f} \\\\",
         r"\bottomrule",
         r"\end{tabular}",
         f"\\caption{{Tiempos de ejecución ({escape_latex(data['config']['approach'])})}}",
@@ -124,6 +126,8 @@ def timing_table(data: dict, label_suffix: str) -> str:
 def comparison_table(clifford_data: dict, parametric_data: dict) -> str:
     c_timing = clifford_data["timing"]
     p_timing = parametric_data["timing"]
+    c_res = clifford_data["results"]
+    p_res = parametric_data["results"]
     c_cfg = clifford_data["config"]
     p_cfg = parametric_data["config"]
 
@@ -137,32 +141,72 @@ def comparison_table(clifford_data: dict, parametric_data: dict) -> str:
         r"\centering",
         r"\begin{tabular}{lccc}",
         r"\toprule",
-        r"Métrica & Clifford & Paramétrico & Ratio (param./clifford) \\",
+        r"\textbf{Métrica} & \textbf{Clifford} & \textbf{Rotación (Paramétrico)} & \textbf{Ratio (Rot./Clif.)} \\",
         r"\midrule",
-        f"Backend de simulación & {escape_latex(c_cfg['simulator_method'])} & "
-        f"{escape_latex(p_cfg['simulator_method'])} & -- \\\\",
-        f"Tiempo total simulación (s) & {c_timing['total_simulation_seconds']:.2f} & "
-        f"{p_timing['total_simulation_seconds']:.2f} & "
-        f"{speedup(p_timing['total_simulation_seconds'], c_timing['total_simulation_seconds'])} \\\\",
-        f"Tiempo total reloj (s) & {c_timing['total_wall_seconds']:.2f} & "
-        f"{p_timing['total_wall_seconds']:.2f} & "
-        f"{speedup(p_timing['total_wall_seconds'], c_timing['total_wall_seconds'])} \\\\",
-        f"Tiempo total CPU (s) & {c_timing['total_cpu_seconds']:.2f} & "
-        f"{p_timing['total_cpu_seconds']:.2f} & "
-        f"{speedup(p_timing['total_cpu_seconds'], c_timing['total_cpu_seconds'])} \\\\",
-        f"Sim.\\ media / generación (s) & {c_timing['avg_simulation_seconds_per_generation']:.2f} & "
-        f"{p_timing['avg_simulation_seconds_per_generation']:.2f} & "
-        f"{speedup(p_timing['avg_simulation_seconds_per_generation'], c_timing['avg_simulation_seconds_per_generation'])} \\\\",
-        f"Approx.\\ ratio validación & {clifford_data['results']['best_validation_avg_approx_ratio']:.4f} & "
-        f"{parametric_data['results']['best_validation_avg_approx_ratio']:.4f} & -- \\\\",
-        f"Profundidad mejor individuo & {clifford_data['results']['best_individual_depth']} & "
-        f"{parametric_data['results']['best_individual_depth']} & -- \\\\",
+        r"\multicolumn{4}{l}{\textit{Configuración}} \\",
+        r"\midrule",
+        f"Backend de simulación & {escape_latex(c_cfg['simulator_method'])} & {escape_latex(p_cfg['simulator_method'])} & -- \\\\",
+        r"\midrule",
+        r"\multicolumn{4}{l}{\textit{Calidad de la Solución}} \\",
+        r"\midrule",
+        f"Approx.\\ ratio medio (valid.) & {c_res['best_validation_avg_approx_ratio']:.6f} & {p_res['best_validation_avg_approx_ratio']:.6f} & {speedup(p_res['best_validation_avg_approx_ratio'], c_res['best_validation_avg_approx_ratio'])} \\\\",
+        f"Profundidad mejor individuo & {c_res['best_individual_depth']} & {p_res['best_individual_depth']} & -- \\\\",
+        r"\midrule",
+        r"\multicolumn{4}{l}{\textit{Tiempos de Ejecución (s)}} \\",
+        r"\midrule",
+        f"Total (simulación pura) & {c_timing['total_simulation_seconds']:.4f} & {p_timing['total_simulation_seconds']:.4f} & {speedup(p_timing['total_simulation_seconds'], c_timing['total_simulation_seconds'])} \\\\",
+        f"Total (reloj) & {c_timing['total_wall_seconds']:.4f} & {p_timing['total_wall_seconds']:.4f} & {speedup(p_timing['total_wall_seconds'], c_timing['total_wall_seconds'])} \\\\",
+        f"Total (CPU) & {c_timing['total_cpu_seconds']:.4f} & {p_timing['total_cpu_seconds']:.4f} & {speedup(p_timing['total_cpu_seconds'], c_timing['total_cpu_seconds'])} \\\\",
+        f"Media / generación (sim.) & {c_timing['avg_simulation_seconds_per_generation']:.4f} & {p_timing['avg_simulation_seconds_per_generation']:.4f} & {speedup(p_timing['avg_simulation_seconds_per_generation'], c_timing['avg_simulation_seconds_per_generation'])} \\\\",
         r"\bottomrule",
         r"\end{tabular}",
-        r"\caption{Comparación Clifford vs. paramétrico: coste de simulación y calidad de solución}",
-        r"\label{tab:comparison-clifford-parametric}",
+        r"\caption{Comparación detallada Clifford vs. Paramétrico: Configuración, Calidad y Rendimiento.}",
+        r"\label{tab:comparison-detailed}",
         r"\end{table}",
     ]
+    return "\n".join(lines)
+
+
+def history_table(clifford_data: dict, parametric_data: dict, step: int = 15) -> str:
+    c_hist = clifford_data["history"]
+    p_hist = parametric_data["history"]
+
+    total_gens = len(c_hist["generation"])
+    indices = list(range(0, total_gens, step))
+    if indices[-1] != total_gens - 1:
+        indices.append(total_gens - 1)
+
+    lines = [
+        r"\begin{table}[htbp]",
+        r"\centering",
+        r"\begin{tabular}{c | cc | cc}",
+        r"\toprule",
+        r"& \multicolumn{2}{c|}{\textbf{Clifford}} & \multicolumn{2}{c}{\textbf{Rotación (Paramétrico)}} \\",
+        r"\textbf{Generación} & \textbf{Approx. Ratio} & \textbf{Tiempo Sim. (s)} & \textbf{Approx. Ratio} & \textbf{Tiempo Sim. (s)} \\",
+        r"\midrule",
+    ]
+
+    for i in indices:
+        gen = c_hist["generation"][i]
+        c_ar = c_hist["best_avg_ar"][i]
+        c_sim = c_hist["simulation_seconds"][i]
+        p_ar = p_hist["best_avg_ar"][i]
+        p_sim = p_hist["simulation_seconds"][i]
+
+        lines.append(
+            f"{gen} & {c_ar:.4f} & {c_sim:.4f} & {p_ar:.4f} & {p_sim:.4f} \\\\"
+        )
+
+    lines.extend(
+        [
+            r"\bottomrule",
+            r"\end{tabular}",
+            f"\\caption{{Evolución del algoritmo: Calidad de la solución y tiempo de simulación (muestreado cada {step} generaciones)}}",
+            r"\label{tab:history-evolution}",
+            r"\end{table}",
+        ]
+    )
+
     return "\n".join(lines)
 
 
@@ -189,6 +233,7 @@ def build_document(
 
     if clifford_data and parametric_data:
         sections.append(comparison_table(clifford_data, parametric_data))
+        sections.append(history_table(clifford_data, parametric_data, step=15))
 
     return "\n\n".join(section for section in sections if section)
 
