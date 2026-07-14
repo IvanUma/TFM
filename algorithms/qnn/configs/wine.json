@@ -2,11 +2,7 @@
     "approach": "rotation",
     "random_seed": 42,
     "qnn": {
-        "dataset": "breast_cancer",
-        "datasets_to_run": [
-            "wine",
-            "breast_cancer"
-        ],
+        "dataset": "wine",
         "test_split": 0.2,
         "val_split": 0.35
     },
@@ -35,7 +31,7 @@
         "shots_start": 2048,
         "shots_end": 4096,
         "final_validation_shots": 8192,
-        "cobyla_maxiter_factor": 18
+        "cobyla_maxiter_factor": 14
     },
     "encoding": {
         "enable_input_params": true,

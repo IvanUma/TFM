@@ -46,19 +46,13 @@ def simplify_gate_sequence(gates: List[QuantumGen], num_qubits: int) -> List[Qua
     return optimized if optimized else list(gates)
 
 
-def cx_quantum_circuit(ind1: EvolutionaryIndividual, ind2: EvolutionaryIndividual, num_qubits: int):
-    size = min(len(ind1), len(ind2)) - num_qubits
-    if size < 2:
+def cx_quantum_circuit(ind1: EvolutionaryIndividual, ind2: EvolutionaryIndividual, num_qubits: int, indpb: float = 0.5):
+    size = min(len(ind1), len(ind2))
+    if size <= num_qubits:
         return ind1, ind2
-    cx1 = random.randint(1, size)
-    cx2 = random.randint(1, size - 1)
-    if cx2 >= cx1:
-        cx2 += 1
-    else:
-        cx1, cx2 = cx2, cx1
-    cx1 += num_qubits
-    cx2 += num_qubits
-    ind1[cx1:cx2], ind2[cx1:cx2] = ind2[cx1:cx2], ind1[cx1:cx2]
+    for i in range(num_qubits, size):
+        if random.random() < indpb and ind1[i][0] == ind2[i][0]:
+            ind1[i], ind2[i] = ind2[i], ind1[i]
     return ind1, ind2
 
 

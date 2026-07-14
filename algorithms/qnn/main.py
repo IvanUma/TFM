@@ -1,13 +1,14 @@
-# main.py
 from __future__ import annotations
 
 import copy
 import functools
 import json
 import os
+import random
 import subprocess
 import sys
 import time
+from collections import deque
 from datetime import datetime
 from multiprocessing import Pool
 from pathlib import Path
@@ -16,10 +17,16 @@ from typing import List, Tuple
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
+import seaborn as sns
 from deap import algorithms, base, creator, tools
 from qiskit import qpy
 
 matplotlib.use("Agg")
+
+sns.set_theme(style="whitegrid", context="paper", font_scale=1.2)
+plt.rcParams["figure.dpi"] = 300
+plt.rcParams["savefig.dpi"] = 300
+plt.rcParams["font.family"] = "serif"
 
 if not hasattr(creator, "MultiFitness"):
     creator.create("MultiFitness", base.Fitness, weights=(-1.0, -1.0))
@@ -27,6 +34,12 @@ if not hasattr(creator, "MultiIndividual"):
     creator.create("MultiIndividual", list, fitness=creator.MultiFitness)
 
 toolbox: base.Toolbox = base.Toolbox()
+
+
+def _init_worker(dataset_name: str, approach: str) -> None:
+    from algorithms.qnn import utils as qnn_utils
+
+    qnn_utils.init_config(dataset_name, approach)
 
 
 def cpu_seconds_snapshot() -> float:
@@ -37,20 +50,36 @@ def cpu_seconds_snapshot() -> float:
 def evaluate_population(
     individuals, toolbox, champion_weights=None
 ) -> Tuple[int, float]:
+    from algorithms.qnn.utils import CONFIG
+
     invalid = [ind for ind in individuals if not ind.fitness.valid]
     if not invalid:
         return 0, 0.0
+
+    inheritance_prob = CONFIG["evolution"].get("champion_inheritance_prob", 0.15)
+    inheritance_prob = max(inheritance_prob, 0.6)
+
     for ind in invalid:
-        own_weights = getattr(ind, "stored_thetas", None) or {}
-        champion = champion_weights or {}
-        merged_seed = {**champion, **own_weights}
-        ind._seed_weights = merged_seed if merged_seed else None
+        own_prior = getattr(ind, "stored_thetas", None)
+        if own_prior:
+            ind._seed_weights = {
+                k: v + random.gauss(0, 0.05) for k, v in own_prior.items()
+            }
+        elif champion_weights is not None and random.random() < inheritance_prob:
+            noise = {
+                k: v + (random.gauss(0, 0.05)) for k, v in champion_weights.items()
+            }
+            ind._seed_weights = noise
+
     results = toolbox.map(toolbox.evaluate, invalid)
     per_individual_simulation_seconds = []
-    for ind, (fit, weights, _, simulation_seconds) in zip(invalid, results):
+    for ind, (fit, weights, readout_data, simulation_seconds) in zip(invalid, results):
         ind.fitness.values = fit
         ind.stored_thetas = weights
-        del ind._seed_weights
+        if readout_data is not None:
+            ind._readout_clf = readout_data
+        if hasattr(ind, "_seed_weights"):
+            del ind._seed_weights
         per_individual_simulation_seconds.append(simulation_seconds)
     batch_simulation_seconds = (
         max(per_individual_simulation_seconds)
@@ -60,9 +89,75 @@ def evaluate_population(
     return len(invalid), batch_simulation_seconds
 
 
+def plot_evolution_progress(
+    generations, train_soft, val_acc, val_champion, depth_per_gen, depth_champion,
+    val_champion_best, depth_champion_best, train_best, val_best, approach,
+    output_stem, output_dir,
+):
+    fig, ax1 = plt.subplots(figsize=(8, 5))
+    ax1.set_xlabel("Generación")
+    ax1.set_ylabel("Accuracy")
+
+    sns.lineplot(x=generations, y=val_acc, label="Per-Gen Best", color="#2c7bb6", linestyle=":", ax=ax1, legend=False)
+    sns.lineplot(x=generations, y=val_champion, label="Best-ever Champion", color="#d7191c", ax=ax1, legend=False)
+
+    ax2 = ax1.twinx()
+    ax2.set_ylabel("Profundidad (Depth)")
+    sns.lineplot(x=generations, y=depth_per_gen, label="Per-Gen Depth", color="#fdae61", linestyle=":", ax=ax2, legend=False)
+    sns.lineplot(x=generations, y=depth_champion, label="Champion Depth", color="#fdae61", ax=ax2, legend=False)
+
+    ax1.legend(handles=ax1.get_lines() + ax2.get_lines(),
+               labels=[l.get_label() for l in ax1.get_lines() + ax2.get_lines()],
+               loc="upper center", bbox_to_anchor=(0.5, -0.15), ncol=2, framealpha=1)
+
+    fig.tight_layout()
+    fig.subplots_adjust(bottom=0.25)
+    fig.savefig(output_dir / f"{output_stem}.pdf", format="pdf", bbox_inches="tight")
+    plt.close(fig)
+
+    fig2, ax_left = plt.subplots(figsize=(8, 5))
+    ax_left.set_xlabel("Generación")
+    ax_left.set_ylabel("Training Soft Score")
+    sns.lineplot(x=generations, y=train_soft, label="Train Soft Score", color="#2c7bb6", ax=ax_left, legend=False)
+
+    ax_right = ax_left.twinx()
+    ax_right.set_ylabel("Validation Accuracy")
+    sns.lineplot(x=generations, y=val_acc, label="Val Acc", color="#d7191c", linestyle="--", ax=ax_right, legend=False)
+
+    ax_left.legend(handles=ax_left.get_lines() + ax_right.get_lines(),
+                   labels=[l.get_label() for l in ax_left.get_lines() + ax_right.get_lines()],
+                   loc="upper center", bbox_to_anchor=(0.5, -0.15), ncol=2, framealpha=1)
+
+    fig2.tight_layout()
+    fig2.subplots_adjust(bottom=0.25)
+    fig2.savefig(output_dir / f"{output_stem}_train_vs_val.pdf", format="pdf", bbox_inches="tight")
+    plt.close(fig2)
+
+
 def main() -> None:
     project_root = Path(__file__).resolve().parents[2]
     sys.path.insert(0, str(project_root))
+
+    import argparse as _argparse
+
+    _main_parser = _argparse.ArgumentParser()
+    _main_parser.add_argument("--approach", type=str, default=None)
+    _main_parser.add_argument("--dataset", type=str, default=None)
+    _main_args, _ = _main_parser.parse_known_args()
+
+    from algorithms.qnn import utils as qnn_utils
+
+    _dataset = _main_args.dataset
+    _approach = _main_args.approach
+    if _dataset is None:
+        _default_cfg_path = Path(__file__).parent / "config.json"
+        with open(_default_cfg_path, encoding="utf-8") as _f:
+            _default_cfg = json.load(_f)
+        _dataset = _default_cfg.get("qnn", {}).get("dataset", "iris")
+        if _approach is None:
+            _approach = _default_cfg.get("approach", "rotation")
+
+    qnn_utils.init_config(_dataset, approach=_approach)
 
     from algorithms.qnn.utils import (
         APPROACH,
@@ -74,6 +169,7 @@ def main() -> None:
         NUM_PARAMS,
         PARAM_BLOCK_PROB,
         TEST_SPLIT,
+        VAL_SPLIT,
         SIMULATOR_DEVICE,
         build_quantum_circuit,
         cx_quantum_circuit,
@@ -97,6 +193,7 @@ def main() -> None:
         load_qnn_data(
             dataset_name,
             test_split=TEST_SPLIT,
+            val_split=VAL_SPLIT,
             random_state=42,
             encoding_mode=encoding_mode,
         )
@@ -131,7 +228,10 @@ def main() -> None:
     )
 
     toolbox.register("population", tools.initRepeat, list, toolbox.individual)
-    toolbox.register("mate", cx_quantum_circuit, num_qubits=circuit_qubits)
+    crossover_indpb = variation_config.get("crossover_indpb", 0.5)
+    toolbox.register(
+        "mate", cx_quantum_circuit, num_qubits=circuit_qubits, indpb=crossover_indpb
+    )
     toolbox.register(
         "mutate",
         mut_quantum_circuit,
@@ -152,7 +252,15 @@ def main() -> None:
             cpu_total = os.cpu_count() or 1
             requested_processes = max(1, cpu_total - 1)
 
-    pool = Pool(processes=requested_processes) if use_multiprocessing else None
+    pool = (
+        Pool(
+            processes=requested_processes,
+            initializer=_init_worker,
+            initargs=(_dataset, _approach),
+        )
+        if use_multiprocessing
+        else None
+    )
     toolbox.parallel_evaluation = pool is not None
     toolbox.register("map", pool.map if pool is not None else map)
 
@@ -161,12 +269,11 @@ def main() -> None:
         f"Dataset: {dataset_name} ({dataset_info['n_features']} features -> {circuit_qubits} qubits, {n_classes} classes)"
     )
     print(
-        f"Training samples: {dataset_info['n_train']} | Validation: {dataset_info['n_val']} | Test: {dataset_info['n_test']}"
+        f"Training: {dataset_info['n_train']} | Validation: {dataset_info['n_val']} | Test: {dataset_info['n_test']}"
     )
-    print(f"Encoding mode: {encoding_mode}")
-    print(f"Input parameters: {NUM_PARAMS} {MANUAL_INPUT_VALUES}")
-    print(f"Approach: {APPROACH.upper()}")
-    print(f"Processes: {requested_processes if pool is not None else 1}")
+    print(
+        f"Approach: {APPROACH.upper()} | Processes: {requested_processes if pool is not None else 1}"
+    )
     sim_method = "stabilizer" if APPROACH == "clifford" else "statevector"
     print(f"Simulator: {sim_method} on {SIMULATOR_DEVICE}\n")
 
@@ -187,9 +294,10 @@ def main() -> None:
         "gen",
         "shots",
         "val_acc",
+        "champion_acc",
         "best_depth",
+        "champion_depth",
         "wall_seconds",
-        "cpu_seconds",
         "simulation_seconds",
     ]
 
@@ -199,17 +307,36 @@ def main() -> None:
     statistics.register("min", np.min)
     statistics.register("mean", np.mean)
 
-    best_train_acc_ever = -1.0
+    champion_val_acc_ever = 0.0
+    champion_depth_ever = 0.0
     absolute_champion = None
     champion_thetas = {}
     stagnant_generations = 0
+    champion_check_k = evolution_config.get("champion_check_k", 5)
+    champion_check_shots = evolution_config.get("champion_check_shots", 4096)
+    patience_window = evolution_config.get("patience_window", max(1, patience // 4))
+    recent_val_accs = deque(maxlen=patience_window)
+    champion_smoothed_ever = 0.0
     run_start_wall = time.perf_counter()
-    run_start_cpu = cpu_seconds_snapshot()
     total_simulation_seconds = 0.0
+
+    toolbox.register(
+        "evaluate",
+        functools.partial(
+            evaluate_circuit,
+            num_qubits=circuit_qubits,
+            instances=training_data,
+            shots=evaluation_config["shots_start"],
+            n_classes=n_classes,
+            X_val=X_val_enc,
+            y_val=y_val,
+        ),
+    )
+    print("Evaluando población inicial...")
+    evaluate_population(population, toolbox, champion_weights=None)
 
     for gen in range(generations):
         gen_start_wall = time.perf_counter()
-        gen_start_cpu = cpu_seconds_snapshot()
         gen_simulation_seconds = 0.0
 
         progress = gen / (generations - 1) if generations > 1 else 1.0
@@ -219,41 +346,18 @@ def main() -> None:
             * progress
         )
 
-        subsample_ratio = 0.3 + 0.7 * progress
-        total_size = len(training_data)
-        train_size = max(5, int(total_size * subsample_ratio * 0.7))
-        val_size = max(5, int(total_size * subsample_ratio * 0.3))
-
-        subsample_rng = np.random.default_rng(42 + gen)
-        subsample_idx = subsample_rng.choice(
-            total_size, size=min(total_size, train_size + val_size), replace=False
-        )
-
-        train_idx = subsample_idx[:train_size]
-        val_idx = subsample_idx[train_size:]
-
-        subsampled_data = [training_data[i] for i in train_idx]
-        dynamic_X_val = np.array([training_data[i][0] for i in val_idx])
-        dynamic_y_val = np.array([training_data[i][1] for i in val_idx])
-
         toolbox.register(
             "evaluate",
             functools.partial(
                 evaluate_circuit,
                 num_qubits=circuit_qubits,
-                instances=subsampled_data,
+                instances=training_data,
                 shots=current_shots,
                 n_classes=n_classes,
-                X_val=dynamic_X_val,
-                y_val=dynamic_y_val,
+                X_val=X_val_enc,
+                y_val=y_val,
             ),
         )
-
-        if gen == 0:
-            _, seconds_spent = evaluate_population(
-                population, toolbox, champion_weights=None
-            )
-            gen_simulation_seconds += seconds_spent
 
         offspring = algorithms.varOr(
             population, toolbox, lambda_, crossover_prob, mutation_prob
@@ -265,48 +369,76 @@ def main() -> None:
         )
         gen_simulation_seconds += seconds_spent
 
-        if stagnant_generations > patience // 2:
-            n_immigrants = max(1, mu // 10)
+        if stagnant_generations > patience // 4:
+            n_immigrants = max(4, mu // 3)
             immigrants = [
                 creator.MultiIndividual(toolbox.individual())
                 for _ in range(n_immigrants)
             ]
+            if absolute_champion is not None and random.random() < 0.5:
+                champion_copy = toolbox.clone(absolute_champion)
+                mut_quantum_circuit(
+                    champion_copy,
+                    circuit_qubits,
+                    0.5,
+                    max_params=NUM_PARAMS,
+                    enable_input_params=ENABLE_INPUT_PARAMS,
+                    param_block_prob=PARAM_BLOCK_PROB,
+                )
+                del champion_copy.fitness.values
+                immigrants.append(champion_copy)
             _, immigrant_seconds = evaluate_population(
                 immigrants, toolbox, champion_weights=None
             )
             gen_simulation_seconds += immigrant_seconds
-            offspring = offspring + immigrants
+            offspring.extend(immigrants)
 
         population[:] = toolbox.select(population + offspring, mu)
+
+        if absolute_champion is not None:
+            champion_clone = toolbox.clone(absolute_champion)
+            if champion_clone not in population:
+                population[-1] = champion_clone
 
         pareto_front = tools.sortNondominated(
             population, len(population), first_front_only=True
         )[0]
-        best_individual = min(pareto_front, key=lambda ind: ind.fitness.values[0])
-        best_acc_dyn = -best_individual.fitness.values[0]
+        train_ranked = sorted(pareto_front, key=lambda ind: ind.fitness.values[0])
+        top_k = train_ranked[:champion_check_k]
+        best_val_acc = -1.0
+        best_val_ind = None
+        for val_ind in top_k:
+            val_acc, _ = validate_circuit(
+                val_ind,
+                circuit_qubits,
+                X_val_enc,
+                y_val,
+                champion_check_shots,
+                n_classes,
+                seed_weights=getattr(val_ind, "stored_thetas", {}),
+            )
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                best_val_ind = val_ind
+        true_val_acc, true_val_soft = best_val_acc, 0.0
+        best_individual = best_val_ind or train_ranked[0]
+        best_soft_dyn = -best_individual.fitness.values[0]
         best_depth = best_individual.fitness.values[1]
         record = statistics.compile(population)
         gen_wall_seconds = time.perf_counter() - gen_start_wall
-        gen_cpu_seconds = cpu_seconds_snapshot() - gen_start_cpu
         total_simulation_seconds += gen_simulation_seconds
 
-        true_val_acc = validate_circuit(
-            best_individual,
-            circuit_qubits,
-            X_val_enc,
-            y_val,
-            current_shots,
-            n_classes,
-            seed_weights=getattr(best_individual, "stored_thetas", {}),
-        )
+        recent_val_accs.append(true_val_acc)
 
         logbook.record(
             gen=gen,
             shots=current_shots,
+            train_soft=best_soft_dyn,
             best_acc=true_val_acc,
+            champion_acc=champion_val_acc_ever,
             best_depth=best_depth,
+            champion_depth=champion_depth_ever,
             wall_seconds=gen_wall_seconds,
-            cpu_seconds=gen_cpu_seconds,
             simulation_seconds=gen_simulation_seconds,
             **record,
         )
@@ -317,14 +449,19 @@ def main() -> None:
             else 0.0
         )
         print(
-            f"Gen {gen}: Dyn Val Acc = {best_acc_dyn:.4f} | True Val Acc = {true_val_acc:.4f} | Depth = {best_depth:.1f} | Wall = {gen_wall_seconds:.2f}s | Sim = {gen_simulation_seconds:.2f}s ({sim_share_pct:.1f}% of wall)"
+            f"Gen {gen:>3d} | Train = {best_soft_dyn:.4f} | Val  = {true_val_acc:.4f} | "
+            f"Champ = {champion_val_acc_ever:.4f} | Depth = {best_depth:3.0f} | "
+            f"Wall = {gen_wall_seconds:6.2f}s | Sim = {gen_simulation_seconds:6.2f}s ({sim_share_pct:5.1f}%)"
         )
 
         last_gen = gen
 
-        if true_val_acc > best_train_acc_ever + improvement_epsilon:
-            best_train_acc_ever = true_val_acc
-            stagnant_generations = 0
+        smoothed_val = np.mean(recent_val_accs)
+        progress_detected = smoothed_val > champion_smoothed_ever + improvement_epsilon
+
+        if true_val_acc > champion_val_acc_ever + improvement_epsilon:
+            champion_val_acc_ever = true_val_acc
+            champion_depth_ever = best_depth
             absolute_champion = toolbox.clone(best_individual)
             champion_thetas = copy.deepcopy(
                 getattr(best_individual, "stored_thetas", {})
@@ -335,19 +472,39 @@ def main() -> None:
                 for block_gene in best_individual:
                     if block_gene[0] == "PARAM_BLOCK":
                         update_hof(block_gene[2])
+        elif (
+            abs(true_val_acc - champion_val_acc_ever) <= improvement_epsilon
+            and best_depth < champion_depth_ever
+        ):
+            champion_depth_ever = best_depth
+            absolute_champion = toolbox.clone(best_individual)
+            champion_thetas = copy.deepcopy(
+                getattr(best_individual, "stored_thetas", {})
+            )
+            if APPROACH == "clifford":
+                from algorithms.qnn.utils import update_hof
+
+                for block_gene in best_individual:
+                    if block_gene[0] == "PARAM_BLOCK":
+                        update_hof(block_gene[2])
+
+        if progress_detected:
+            champion_smoothed_ever = smoothed_val
+            stagnant_generations = 0
         else:
             stagnant_generations += 1
 
         if stagnant_generations >= patience:
-            print(f"[INFO] Early stopping at generation {gen} (patience={patience})")
+            print(f"[INFO] Early stopping en generación {gen} (paciencia={patience})")
             break
 
-        if stagnant_generations > patience // 3:
+        if stagnant_generations > patience // 5:
             current_indpb = min(
-                0.3, base_indpb * (1.0 + 0.5 * stagnant_generations / patience)
+                0.7, base_indpb * (1.0 + 5.0 * stagnant_generations / patience)
             )
         else:
             current_indpb = base_indpb
+
         toolbox.register(
             "mutate",
             mut_quantum_circuit,
@@ -358,10 +515,44 @@ def main() -> None:
             param_block_prob=PARAM_BLOCK_PROB,
         )
 
+        if stagnant_generations > patience // 2 and absolute_champion is not None:
+            # Round fitness values before comparing. Continuous-weight (rotation)
+            # circuits almost never produce exactly-equal floats even when the
+            # population has genuinely converged, which silently disabled this
+            # check. Binning to 3 decimals lets it fire for both approaches.
+            unique_fitness = {
+                tuple(round(v, 3) for v in ind.fitness.values) for ind in population
+            }
+            if len(unique_fitness) < mu // 4:
+                print(
+                    f"[DIVERSITY] Baja diversidad ({len(unique_fitness)} fit únicos). "
+                    f"Reiniciando población alrededor del campeón (gen {gen})"
+                )
+                keeper = toolbox.clone(absolute_champion)
+                new_pop = [keeper]
+                n_mutated = int((mu - 1) * 0.6)
+                n_fresh = (mu - 1) - n_mutated
+                for _ in range(n_mutated):
+                    ind = toolbox.clone(absolute_champion)
+                    mut_quantum_circuit(
+                        ind,
+                        circuit_qubits,
+                        current_indpb,
+                        max_params=NUM_PARAMS,
+                        enable_input_params=ENABLE_INPUT_PARAMS,
+                        param_block_prob=PARAM_BLOCK_PROB,
+                    )
+                    del ind.fitness.values
+                    new_pop.append(ind)
+                for _ in range(n_fresh):
+                    ind = creator.MultiIndividual(toolbox.individual())
+                    new_pop.append(ind)
+                _, _ = evaluate_population(new_pop[1:], toolbox, champion_weights=None)
+                population[:] = new_pop
+                stagnant_generations = 0
+
     total_wall_seconds = time.perf_counter() - run_start_wall
-    total_cpu_seconds = cpu_seconds_snapshot() - run_start_cpu
     avg_wall_per_gen = total_wall_seconds / (last_gen + 1)
-    avg_cpu_per_gen = total_cpu_seconds / (last_gen + 1)
     avg_simulation_per_gen = total_simulation_seconds / (last_gen + 1)
 
     total_sim_share_pct = (
@@ -370,10 +561,10 @@ def main() -> None:
         else 0.0
     )
     print(
-        f"\n[TIMING] Total: Wall = {total_wall_seconds:.2f}s | Sim = {total_simulation_seconds:.2f}s ({total_sim_share_pct:.1f}%) over {last_gen + 1} gens"
+        f"\n[TIMING] Total: Wall = {total_wall_seconds:.2f}s | Sim = {total_simulation_seconds:.2f}s ({total_sim_share_pct:.1f}%) sobre {last_gen + 1} gens"
     )
     print(
-        f"[TIMING] Avg/gen: Wall = {avg_wall_per_gen:.2f}s | Sim = {avg_simulation_per_gen:.2f}s\n"
+        f"[TIMING] Promedio/gen: Wall = {avg_wall_per_gen:.2f}s | Sim = {avg_simulation_per_gen:.2f}s\n"
     )
 
     if pool is not None:
@@ -389,7 +580,7 @@ def main() -> None:
 
     final_shots = evaluation_config["final_validation_shots"]
 
-    final_val_acc = validate_circuit(
+    final_val_acc, final_val_soft = validate_circuit(
         absolute_champion,
         circuit_qubits,
         X_val_enc,
@@ -398,7 +589,7 @@ def main() -> None:
         n_classes,
         seed_weights=champion_thetas,
     )
-    final_test_acc = validate_circuit(
+    final_test_acc, final_test_soft = validate_circuit(
         absolute_champion,
         circuit_qubits,
         X_test_enc,
@@ -449,10 +640,12 @@ def main() -> None:
         json.dump(genotype_payload, f, indent=4)
 
     generations_axis = logbook.select("gen")
+    history_train_soft = logbook.select("train_soft")
     history_acc = logbook.select("best_acc")
+    history_champion_acc = logbook.select("champion_acc")
     history_depth = logbook.select("best_depth")
+    history_champion_depth = logbook.select("champion_depth")
     history_wall_seconds = logbook.select("wall_seconds")
-    history_cpu_seconds = logbook.select("cpu_seconds")
     history_simulation_seconds = logbook.select("simulation_seconds")
 
     output_data = {
@@ -463,20 +656,13 @@ def main() -> None:
             "encoding_mode": encoding_mode,
             "circuit_qubits": circuit_qubits,
             "n_classes": n_classes,
-            "num_params": NUM_PARAMS,
-            "manual_input_values": MANUAL_INPUT_VALUES,
             "simulator_device": SIMULATOR_DEVICE,
             "training_samples": dataset_info["n_train"],
             "validation_samples": dataset_info["n_val"],
             "test_samples": dataset_info["n_test"],
-            "generations_configured": generations,
             "generations_run": last_gen + 1,
             "mu": mu,
             "lambda": lambda_,
-            "population": population_config,
-            "variation": variation_config,
-            "evolution": evolution_config,
-            "evaluation": evaluation_config,
         },
         "results": {
             "final_validation_accuracy": float(final_val_acc),
@@ -486,18 +672,18 @@ def main() -> None:
         },
         "timing": {
             "total_wall_seconds": float(total_wall_seconds),
-            "total_cpu_seconds": float(total_cpu_seconds),
             "total_simulation_seconds": float(total_simulation_seconds),
             "avg_wall_seconds_per_generation": float(avg_wall_per_gen),
-            "avg_cpu_seconds_per_generation": float(avg_cpu_per_gen),
             "avg_simulation_seconds_per_generation": float(avg_simulation_per_gen),
         },
         "history": {
             "generation": [int(g) for g in generations_axis],
+            "train_soft_score": [float(s) for s in history_train_soft],
             "best_accuracy": [float(c) for c in history_acc],
+            "champion_accuracy": [float(c) for c in history_champion_acc],
             "best_depth": [float(d) for d in history_depth],
+            "champion_depth": [float(d) for d in history_champion_depth],
             "wall_seconds": [float(w) for w in history_wall_seconds],
-            "cpu_seconds": [float(c) for c in history_cpu_seconds],
             "simulation_seconds": [float(s) for s in history_simulation_seconds],
         },
     }
@@ -506,42 +692,38 @@ def main() -> None:
         json.dump(output_data, f, indent=4)
 
     print(
-        f"\n[VALIDATION] Final val acc: {final_val_acc:.4f} | Test acc: {final_test_acc:.4f}"
+        f"\n[VALIDATION] Val Acc Final: {final_val_acc:.4f} (Soft: {final_val_soft:.4f}) | Test Acc: {final_test_acc:.4f} (Soft: {final_test_soft:.4f})"
     )
     print(f"[SAVED] {output_dir / f'{output_stem}.json'}")
 
-    fig, ax1 = plt.subplots(figsize=(10, 6))
-    color = "tab:blue"
-    ax1.set_xlabel("Generation")
-    ax1.set_ylabel("Accuracy", color=color)
-    ax1.plot(generations_axis, history_acc, color=color, linewidth=2, label="Accuracy")
-    ax1.tick_params(axis="y", labelcolor=color)
-    ax1.grid(True, linestyle="--", alpha=0.5)
-    ax2 = ax1.twinx()
-    color = "tab:orange"
-    ax2.set_ylabel("Depth", color=color)
-    ax2.plot(
-        generations_axis,
-        history_depth,
-        color=color,
-        linestyle="--",
-        linewidth=2,
-        label="Depth",
+    best_val_champion = max(history_champion_acc) if history_champion_acc else 0
+    best_depth_champion = min(history_champion_depth) if history_champion_depth else 0
+    best_train = max(history_train_soft) if history_train_soft else 0
+    best_val = max(history_acc) if history_acc else 0
+    plot_evolution_progress(
+        generations=generations_axis,
+        train_soft=history_train_soft,
+        val_acc=history_acc,
+        val_champion=history_champion_acc,
+        depth_per_gen=history_depth,
+        depth_champion=history_champion_depth,
+        val_champion_best=best_val_champion,
+        depth_champion_best=best_depth_champion,
+        train_best=best_train,
+        val_best=best_val,
+        approach=APPROACH,
+        output_stem=output_stem,
+        output_dir=output_dir,
     )
-    ax2.tick_params(axis="y", labelcolor=color)
-    plt.title(f"QNAS Evolutionary Dynamics ({APPROACH.upper()}): Accuracy vs Depth")
-    fig.tight_layout()
-    plt.savefig(output_dir / f"{output_stem}.png", dpi=300)
-    plt.close(fig)
 
 
 if __name__ == "__main__":
     import argparse as _argparse
 
-    _parser = _argparse.ArgumentParser()
-    _parser.add_argument("--approach", type=str, default=None)
-    _parser.add_argument("--dataset", type=str, default=None)
-    _args, _ = _parser.parse_known_args()
+    _run_parser = _argparse.ArgumentParser()
+    _run_parser.add_argument("--approach", type=str, default=None)
+    _run_parser.add_argument("--dataset", type=str, default=None)
+    _run_args, _ = _run_parser.parse_known_args()
 
     _config_path = Path(__file__).parent / "config.json"
     with open(_config_path, encoding="utf-8") as _f:
@@ -550,23 +732,18 @@ if __name__ == "__main__":
     _approaches = _config.get("approaches", None)
     _datasets = _config.get("qnn", {}).get("datasets_to_run", None)
 
-    if _args.approach:
-        with open(_config_path, encoding="utf-8") as _f:
-            _config = json.load(_f)
-        _config["approach"] = _args.approach
-        with open(_config_path, "w", encoding="utf-8") as _f:
-            json.dump(_config, _f, indent=4)
-
-    if _args.dataset:
-        with open(_config_path, encoding="utf-8") as _f:
-            _config = json.load(_f)
-        _config["qnn"]["dataset"] = _args.dataset
-        with open(_config_path, "w", encoding="utf-8") as _f:
-            json.dump(_config, _f, indent=4)
+    _explicit_dataset = _run_args.dataset is not None
+    _explicit_approach = _run_args.approach is not None
 
     _run_multi = (
-        (_approaches and len(_approaches) > 1) or (_datasets and len(_datasets) > 1)
-    ) and "--internal" not in sys.argv
+        not _explicit_dataset
+        and not _explicit_approach
+        and (
+            (_approaches and len(_approaches) > 1)
+            or (_datasets and len(_datasets) > 1)
+        )
+        and "--internal" not in sys.argv
+    )
 
     if _run_multi:
         _orig_approach = _config.get("approach", (_approaches or ["clifford"])[0])
@@ -582,21 +759,20 @@ if __name__ == "__main__":
                 print(f"\n{'=' * 60}")
                 print(f"  Dataset: {_ds} | Approach: {_a}")
                 print(f"{'=' * 60}\n")
-                _config_single = dict(_config)
-                _config_single["approach"] = _a
-                _config_single["qnn"] = dict(_config["qnn"], dataset=_ds)
-                with open(_config_path, "w", encoding="utf-8") as _f:
-                    json.dump(_config_single, _f, indent=4)
-                _result = subprocess.run([sys.executable, __file__, "--internal"])
+                _result = subprocess.run(
+                    [
+                        sys.executable,
+                        __file__,
+                        "--internal",
+                        "--dataset",
+                        _ds,
+                        "--approach",
+                        _a,
+                    ]
+                )
                 if _result.returncode != 0:
                     print(
-                        f"[ERROR] Dataset {_ds} / Approach {_a} failed (code {_result.returncode})"
+                        f"[ERROR] Dataset {_ds} / Approach {_a} falló (código {_result.returncode})"
                     )
-
-        _config_single = dict(_config)
-        _config_single["approach"] = _orig_approach
-        _config_single["qnn"] = dict(_config["qnn"], dataset=_orig_dataset)
-        with open(_config_path, "w", encoding="utf-8") as _f:
-            json.dump(_config_single, _f, indent=4)
     else:
         main()

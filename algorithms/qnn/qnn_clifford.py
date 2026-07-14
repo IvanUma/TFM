@@ -16,7 +16,7 @@ EvolutionaryIndividual = List[QuantumGen]
 
 CLIFFORD_GATES = ["H", "S", "CX"]
 REPS_MIN = 1
-REPS_MAX = 8
+REPS_MAX = 3
 
 
 def generate_random_gate(num_qubits: int) -> Tuple:

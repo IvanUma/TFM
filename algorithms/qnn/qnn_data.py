@@ -66,6 +66,7 @@ def _clifford_angle_encoding(
 def load_qnn_data(
     dataset_name: str,
     test_split: float = 0.2,
+    val_split: float = 0.2,
     random_state: int = 42,
     encoding_mode: str = "amplitude",
 ) -> Tuple[
@@ -96,7 +97,7 @@ def load_qnn_data(
     y_train, y_test = y[train_idx], y[test_idx]
 
     split = StratifiedShuffleSplit(
-        n_splits=1, test_size=test_split, random_state=random_state
+        n_splits=1, test_size=val_split, random_state=random_state
     )
     train_idx2, val_idx = next(split.split(X_train_raw, y_train))
     X_train, X_val = X_train_raw[train_idx2], X_train_raw[val_idx]

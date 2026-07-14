@@ -2,11 +2,7 @@
     "approach": "rotation",
     "random_seed": 42,
     "qnn": {
-        "dataset": "breast_cancer",
-        "datasets_to_run": [
-            "wine",
-            "breast_cancer"
-        ],
+        "dataset": "iris",
         "test_split": 0.2,
         "val_split": 0.35
     },
@@ -21,21 +17,21 @@
         "crossover_indpb": 0.5
     },
     "evolution": {
-        "generations": 150,
+        "generations": 70,
         "guided_individual_length_min": 8,
         "guided_individual_length_factor": 4,
-        "patience": 30,
+        "patience": 25,
         "patience_window": 5,
         "improvement_epsilon": 0.0005,
         "champion_inheritance_prob": 0.6,
         "champion_check_k": 3,
-        "champion_check_shots": 4096
+        "champion_check_shots": 8192
     },
     "evaluation": {
         "shots_start": 2048,
         "shots_end": 4096,
         "final_validation_shots": 8192,
-        "cobyla_maxiter_factor": 18
+        "cobyla_maxiter_factor": 12
     },
     "encoding": {
         "enable_input_params": true,
