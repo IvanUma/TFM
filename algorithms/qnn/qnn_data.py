@@ -36,12 +36,8 @@ _BUCKET_EDGES = [-0.67, 0.0, 0.67]
 CLIFFORD_ANGLE_LEVELS = [0.0, np.pi / 2, np.pi, 3 * np.pi / 2]
 
 
-def _amplitude_encoding(features: np.ndarray, n_qubits: int) -> np.ndarray:
-    """Codificación por amplitud estirando las características para llenar el espacio."""
-    target_size = 2**n_qubits
-    n_features = features.shape[0]
-    repeats = int(np.ceil(target_size / n_features))
-    state = np.tile(features, repeats)[:target_size].astype(complex)
+def _amplitude_encoding(features: np.ndarray) -> np.ndarray:
+    state = features.astype(complex)
     norm = np.linalg.norm(state)
     if norm > 1e-12:
         state /= norm
@@ -61,6 +57,13 @@ def _clifford_angle_encoding(
     else:
         buckets = np.digitize(features[:n_qubits], bins=_BUCKET_EDGES)
         return buckets.astype(np.int64)
+
+
+def _pad_to(X: np.ndarray, target: int) -> np.ndarray:
+    if X.shape[1] >= target:
+        return X[:, :target]
+    pad_width = target - X.shape[1]
+    return np.pad(X, ((0, 0), (0, pad_width)), mode="constant")
 
 
 def load_qnn_data(
@@ -105,7 +108,12 @@ def load_qnn_data(
 
     n_qubits = info["n_qubits"]
 
-    pca = PCA(n_components=n_qubits, random_state=random_state)
+    if encoding_mode == "amplitude":
+        n_components = min(2**n_qubits, X_train.shape[1])
+    else:
+        n_components = n_qubits
+
+    pca = PCA(n_components=n_components, random_state=random_state)
     X_train_pca = pca.fit_transform(X_train)
     X_val_pca = pca.transform(X_val)
     X_test_pca = pca.transform(X_test_raw)
@@ -123,9 +131,14 @@ def load_qnn_data(
             [_clifford_angle_encoding(x, n_qubits, bucket_edges) for x in X_test_pca]
         )
     else:
-        X_train_enc = np.array([_amplitude_encoding(x, n_qubits) for x in X_train_pca])
-        X_val_enc = np.array([_amplitude_encoding(x, n_qubits) for x in X_val_pca])
-        X_test_enc = np.array([_amplitude_encoding(x, n_qubits) for x in X_test_pca])
+        target = 2**n_qubits
+        X_train_pca = _pad_to(X_train_pca, target)
+        X_val_pca = _pad_to(X_val_pca, target)
+        X_test_pca = _pad_to(X_test_pca, target)
+
+        X_train_enc = np.array([_amplitude_encoding(x) for x in X_train_pca])
+        X_val_enc = np.array([_amplitude_encoding(x) for x in X_val_pca])
+        X_test_enc = np.array([_amplitude_encoding(x) for x in X_test_pca])
 
     dataset_info = {
         "name": dataset_name,

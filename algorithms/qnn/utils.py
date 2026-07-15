@@ -18,7 +18,7 @@ from qiskit.transpiler.passes import (
     CommutativeCancellation,
     Optimize1qGatesDecomposition,
 )
-from qiskit_aer import AerSimulator
+from qiskit.quantum_info import Statevector, StabilizerState
 from scipy.optimize import minimize
 
 from . import qnn_common as common
@@ -39,7 +39,6 @@ MANUAL_INPUT_VALUES = None
 NUM_PARAMS = None
 SIMULATOR_DEVICE = None
 _ENCODING_MODE = None
-_TRAINING_SIMULATOR = None
 _RANDOM_GENERATOR = None
 _STATEVECTOR_THREADS = None
 
@@ -72,16 +71,11 @@ _ROTATION_SIMPLIFY_PM = PassManager(
 
 
 def _resolve_device(requested_device: str) -> str:
-    if requested_device == "CPU":
-        return "CPU"
-    try:
-        available = AerSimulator().available_devices()
-    except Exception:
-        available = ("CPU",)
-    if requested_device == "GPU" and "GPU" in available:
-        return "GPU"
-    if "GPU" in available:
-        return "GPU"
+    if requested_device == "GPU":
+        logger.warning(
+            "El cálculo ahora es exacto vía Statevector/StabilizerState (numpy, solo CPU); "
+            "se ignora la solicitud de GPU."
+        )
     return "CPU"
 
 
@@ -89,12 +83,10 @@ def init_config(dataset_name: str, approach: str | None = None) -> None:
     global _CONFIG, CONFIG, CONFIG_PATH, APPROACH, RANDOM_SEED, DATASET_NAME
     global TEST_SPLIT, VAL_SPLIT, ENABLE_INPUT_PARAMS, PARAM_BLOCK_PROB
     global MANUAL_INPUT_VALUES, NUM_PARAMS, SIMULATOR_DEVICE
-    global _ENCODING_MODE, _TRAINING_SIMULATOR, _RANDOM_GENERATOR, _STATEVECTOR_THREADS
+    global _ENCODING_MODE, _RANDOM_GENERATOR, _STATEVECTOR_THREADS
     global q_strategy, EvolutionaryIndividual, build_quantum_circuit
     global get_param_indices, generate_guided_individual, mut_quantum_circuit
     global serialize_individual, deserialize_individual
-
-    _TRAINING_SIMULATOR = None
 
     config_dir = Path(__file__).parent / "configs"
     config_path = config_dir / f"{dataset_name}.json"
@@ -123,7 +115,9 @@ def init_config(dataset_name: str, approach: str | None = None) -> None:
 
     _manual_input_values = _encoding_cfg.get("manual_input_values", [1.0])
     if not isinstance(_manual_input_values, list) or len(_manual_input_values) == 0:
-        raise ValueError("encoding.manual_input_values must be a non-empty list of numbers")
+        raise ValueError(
+            "encoding.manual_input_values must be a non-empty list of numbers"
+        )
     MANUAL_INPUT_VALUES = [float(v) for v in _manual_input_values]
     NUM_PARAMS = len(MANUAL_INPUT_VALUES)
 
@@ -142,29 +136,6 @@ def init_config(dataset_name: str, approach: str | None = None) -> None:
     SIMULATOR_DEVICE = _resolve_device(_REQUESTED_DEVICE)
 
     _ENCODING_MODE = "clifford_angle" if APPROACH == "clifford" else "amplitude"
-
-
-def get_training_simulator() -> AerSimulator:
-    global _TRAINING_SIMULATOR
-    if _TRAINING_SIMULATOR is None:
-        method = "stabilizer" if APPROACH == "clifford" else "statevector"
-        try:
-            _TRAINING_SIMULATOR = AerSimulator(
-                method=method,
-                device=SIMULATOR_DEVICE if method == "statevector" else "CPU",
-                max_parallel_threads=_STATEVECTOR_THREADS,
-                seed_simulator=RANDOM_SEED,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Failed to init %s simulator (%s); fallback CPU statevector",
-                method,
-                exc,
-            )
-            _TRAINING_SIMULATOR = AerSimulator(
-                method="statevector", device="CPU", seed_simulator=RANDOM_SEED
-            )
-    return _TRAINING_SIMULATOR
 
 
 def _prepare_input_circuit(
@@ -214,17 +185,26 @@ def _effective_depth(qc: QuantumCircuit) -> int:
         return qc.depth()
 
 
-def _expectation_z_from_counts(counts: Dict[str, float], num_qubits: int) -> np.ndarray:
-    total = sum(counts.values())
-    if total == 0:
-        return np.zeros(num_qubits)
+def _expectation_z_from_probs(probs: np.ndarray, num_qubits: int) -> np.ndarray:
     exp_z = np.zeros(num_qubits)
-    for bitstring, count in counts.items():
-        clean = bitstring.replace(" ", "")
+    for idx, p in enumerate(probs):
+        if p == 0.0:
+            continue
+        bits = format(idx, f"0{num_qubits}b")
         for q in range(num_qubits):
-            if q < len(clean):
-                exp_z[q] += count * (1 if clean[q] == "0" else -1)
-    return exp_z / total
+            exp_z[q] += p * (1 if bits[q] == "0" else -1)
+    return exp_z
+
+
+def _exact_probabilities(qc: QuantumCircuit) -> np.ndarray:
+    if APPROACH == "clifford":
+        return StabilizerState(qc).probabilities()
+    return Statevector.from_instruction(qc).probabilities()
+
+
+def _exact_expectation_z(qc: QuantumCircuit, num_qubits: int) -> np.ndarray:
+    probs = _exact_probabilities(qc)
+    return _expectation_z_from_probs(probs, num_qubits)
 
 
 def _exp_z_to_class_probs(
@@ -246,28 +226,6 @@ def _exp_z_to_class_probs(
     probs = np.zeros(n_classes)
     probs[:k] = exp_scores / (np.sum(exp_scores) + 1e-12)
     return probs
-
-
-def _counts_to_class_probs(
-    counts: Dict[str, float], n_classes: int, num_qubits: int, beta: float = 5.0
-) -> np.ndarray:
-    total = sum(counts.values())
-    if total == 0:
-        return np.ones(n_classes) / n_classes
-    return _exp_z_to_class_probs(
-        _expectation_z_from_counts(counts, num_qubits), n_classes, beta
-    )
-
-
-def _classify_from_counts(
-    counts: Dict[str, float], n_classes: int, num_qubits: int
-) -> int:
-    total = sum(counts.values())
-    if total == 0:
-        return int(_RANDOM_GENERATOR.integers(0, n_classes))
-    probs = _counts_to_class_probs(counts, n_classes, num_qubits)
-    candidates = np.where(probs == np.max(probs))[0]
-    return int(_RANDOM_GENERATOR.choice(candidates))
 
 
 @functools.lru_cache(maxsize=500)
@@ -343,72 +301,54 @@ def _qnn_metrics(
     X_data: np.ndarray,
     y_data: np.ndarray,
     weight_map: Dict[int, float],
-    shots: int,
     n_classes: int,
-    simulator: AerSimulator,
     use_logistic: bool = True,
 ) -> Tuple[float, float]:
+    total = len(y_data)
+    if total == 0:
+        return 0.0, 0.0
 
-    def _run_forward_pass(current_weights: Dict[int, float]) -> Tuple[float, float]:
-        total = len(y_data)
-        if total == 0:
-            return 0.0, 0.0
+    _, weight_indices = get_param_indices(individual)
+    sorted_weight_indices = sorted(weight_indices)
+    ansatz = _build_ansatz_circuit(
+        individual, num_qubits, sorted_weight_indices, weight_map
+    )
 
-        _, weight_indices = get_param_indices(individual)
-        sorted_weight_indices = sorted(weight_indices)
-        ansatz = _build_ansatz_circuit(
-            individual, num_qubits, sorted_weight_indices, current_weights
+    exp_z_list = []
+    for i in range(total):
+        qc = _prepare_input_circuit(num_qubits, X_data[i])
+        qc.compose(ansatz, inplace=True)
+        exp_z_list.append(_exact_expectation_z(qc, num_qubits))
+    X_exp_z = np.array(exp_z_list)
+
+    stored_clf = getattr(individual, "_readout_clf", None)
+    if use_logistic:
+        clf = LogisticRegression(
+            C=0.5,
+            solver="lbfgs",
+            max_iter=1000,
+            random_state=RANDOM_SEED,
         )
-
-        circuits = []
-        for i in range(total):
-            qc = _prepare_input_circuit(num_qubits, X_data[i])
-            qc.compose(ansatz, inplace=True)
-            qc.measure_all()
-            circuits.append(qc)
-
-        results = simulator.run(circuits, shots=shots).result()
-
-        exp_z_list = []
-        for i in range(total):
-            counts = results.get_counts(i)
-            exp_z = _expectation_z_from_counts(counts, num_qubits)
-            exp_z_list.append(exp_z)
-        X_exp_z = np.array(exp_z_list)
-
-        stored_clf = getattr(individual, "_readout_clf", None)
-        if use_logistic:
-            clf = LogisticRegression(
-                C=0.5,
-                solver="lbfgs",
-                max_iter=1000,
-                random_state=RANDOM_SEED,
-            )
-            n_splits = min(5, np.bincount(y_data).min())
-            n_splits = max(2, n_splits)
-            probs = cross_val_predict(
-                clf, X_exp_z, y_data, cv=n_splits, method="predict_proba"
-            )
-            clf.fit(X_exp_z, y_data)
-            individual._readout_clf = clf
-        elif stored_clf is not None:
-            probs = stored_clf.predict_proba(X_exp_z)
-        else:
-            probs = np.array(
-                [_exp_z_to_class_probs(ez, n_classes) for ez in exp_z_list]
-            )
-        correct = int(np.sum(np.argmax(probs, axis=1) == y_data))
-        soft_score = float(np.mean(probs[np.arange(total), y_data]))
-        return correct / total, soft_score
-
-    return _run_forward_pass(weight_map)
+        n_splits = min(5, np.bincount(y_data).min())
+        n_splits = max(2, n_splits)
+        probs = cross_val_predict(
+            clf, X_exp_z, y_data, cv=n_splits, method="predict_proba"
+        )
+        clf.fit(X_exp_z, y_data)
+        individual._readout_clf = clf
+    elif stored_clf is not None:
+        probs = stored_clf.predict_proba(X_exp_z)
+    else:
+        probs = np.array([_exp_z_to_class_probs(ez, n_classes) for ez in exp_z_list])
+    correct = int(np.sum(np.argmax(probs, axis=1) == y_data))
+    soft_score = float(np.mean(probs[np.arange(total), y_data]))
+    return correct / total, soft_score
 
 
 def evaluate_circuit(
     individual: EvolutionaryIndividual,
     num_qubits: int,
     instances: List[Tuple[np.ndarray, int]],
-    shots: int,
     n_classes: int,
     X_val: np.ndarray,
     y_val: np.ndarray,
@@ -421,41 +361,35 @@ def evaluate_circuit(
     if not inherited:
         inherited = getattr(individual, "stored_thetas", None)
 
-    simulator = get_training_simulator()
-    simulation_seconds = 0.0
     best_weights = {}
 
+    simulation_seconds = 0.0
+
     if APPROACH == "rotation" and num_weights > 0:
+        input_circuits = [
+            _prepare_input_circuit(num_qubits, features) for features, _ in instances
+        ]
 
         def objective(weight_vector) -> float:
-            nonlocal simulation_seconds
             weight_map = dict(zip(sorted_weight_indices, weight_vector))
             ansatz = _build_ansatz_circuit(
                 individual, num_qubits, sorted_weight_indices, weight_map
             )
 
-            circuits = []
-            for features, label in instances:
-                qc = _prepare_input_circuit(num_qubits, features)
-                qc.compose(ansatz, inplace=True)
-                qc.measure_all()
-                circuits.append(qc)
-
-            sim_start = time.perf_counter()
-            results = simulator.run(circuits, shots=shots).result()
-            simulation_seconds += time.perf_counter() - sim_start
-
             eps = 1e-12
             loss = 0.0
-            for idx, (_, label) in enumerate(instances):
-                counts = results.get_counts(idx)
-                class_probs = _counts_to_class_probs(counts, n_classes, num_qubits)
+            for base_qc, (_, label) in zip(input_circuits, instances):
+                qc = base_qc.copy()
+                qc.compose(ansatz, inplace=True)
+                exp_z = _exact_expectation_z(qc, num_qubits)
+                class_probs = _exp_z_to_class_probs(exp_z, n_classes)
                 loss -= np.log(class_probs[label] + eps)
             return loss / len(instances) if instances else 0.0
 
         maxiter = max(
             50,
-            num_weights * _CONFIG.get("evaluation", {}).get("cobyla_maxiter_factor", 15),
+            num_weights
+            * _CONFIG.get("evaluation", {}).get("cobyla_maxiter_factor", 15),
         )
 
         if inherited:
@@ -465,8 +399,10 @@ def evaluate_circuit(
             starts = [
                 _RANDOM_GENERATOR.uniform(-np.pi, np.pi, size=num_weights),
                 _RANDOM_GENERATOR.uniform(-np.pi, np.pi, size=num_weights),
+                _RANDOM_GENERATOR.uniform(-np.pi, np.pi, size=num_weights),
+                _RANDOM_GENERATOR.uniform(-np.pi, np.pi, size=num_weights),
             ]
-            maxiter = max(30, maxiter // 2)
+            maxiter = max(30, maxiter // 3)
 
         best_result = None
         for x0 in starts:
@@ -495,9 +431,7 @@ def evaluate_circuit(
         X_train_batch,
         y_train_batch,
         best_weights,
-        shots,
         n_classes,
-        simulator,
     )
     simulation_seconds += time.perf_counter() - sim_start
 
@@ -518,11 +452,9 @@ def validate_circuit(
     num_qubits: int,
     X_val: np.ndarray,
     y_val: np.ndarray,
-    shots: int,
     n_classes: int,
     seed_weights: dict | None = None,
 ) -> Tuple[float, float]:
-    simulator = get_training_simulator()
     best_weights = seed_weights if seed_weights is not None else {}
 
     val_acc, soft_score = _qnn_metrics(
@@ -531,9 +463,7 @@ def validate_circuit(
         X_val,
         y_val,
         best_weights,
-        shots,
         n_classes,
-        simulator,
         use_logistic=False,
     )
     return val_acc, soft_score

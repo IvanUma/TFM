@@ -1,0 +1,1 @@
+python .\algorithms\qnn\main.py --dataset breast_cancer --approach rotation

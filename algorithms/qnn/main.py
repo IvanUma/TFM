@@ -90,25 +90,70 @@ def evaluate_population(
 
 
 def plot_evolution_progress(
-    generations, train_soft, val_acc, val_champion, depth_per_gen, depth_champion,
-    val_champion_best, depth_champion_best, train_best, val_best, approach,
-    output_stem, output_dir,
+    generations,
+    train_soft,
+    val_acc,
+    val_champion,
+    depth_per_gen,
+    depth_champion,
+    val_champion_best,
+    depth_champion_best,
+    train_best,
+    val_best,
+    approach,
+    output_stem,
+    output_dir,
 ):
     fig, ax1 = plt.subplots(figsize=(8, 5))
     ax1.set_xlabel("Generación")
     ax1.set_ylabel("Accuracy")
 
-    sns.lineplot(x=generations, y=val_acc, label="Per-Gen Best", color="#2c7bb6", linestyle=":", ax=ax1, legend=False)
-    sns.lineplot(x=generations, y=val_champion, label="Best-ever Champion", color="#d7191c", ax=ax1, legend=False)
+    sns.lineplot(
+        x=generations,
+        y=val_acc,
+        label="Per-Gen Best",
+        color="#2c7bb6",
+        linestyle=":",
+        ax=ax1,
+        legend=False,
+    )
+    sns.lineplot(
+        x=generations,
+        y=val_champion,
+        label="Best-ever Champion",
+        color="#d7191c",
+        ax=ax1,
+        legend=False,
+    )
 
     ax2 = ax1.twinx()
     ax2.set_ylabel("Profundidad (Depth)")
-    sns.lineplot(x=generations, y=depth_per_gen, label="Per-Gen Depth", color="#fdae61", linestyle=":", ax=ax2, legend=False)
-    sns.lineplot(x=generations, y=depth_champion, label="Champion Depth", color="#fdae61", ax=ax2, legend=False)
+    sns.lineplot(
+        x=generations,
+        y=depth_per_gen,
+        label="Per-Gen Depth",
+        color="#fdae61",
+        linestyle=":",
+        ax=ax2,
+        legend=False,
+    )
+    sns.lineplot(
+        x=generations,
+        y=depth_champion,
+        label="Champion Depth",
+        color="#fdae61",
+        ax=ax2,
+        legend=False,
+    )
 
-    ax1.legend(handles=ax1.get_lines() + ax2.get_lines(),
-               labels=[l.get_label() for l in ax1.get_lines() + ax2.get_lines()],
-               loc="upper center", bbox_to_anchor=(0.5, -0.15), ncol=2, framealpha=1)
+    ax1.legend(
+        handles=ax1.get_lines() + ax2.get_lines(),
+        labels=[l.get_label() for l in ax1.get_lines() + ax2.get_lines()],
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.15),
+        ncol=2,
+        framealpha=1,
+    )
 
     fig.tight_layout()
     fig.subplots_adjust(bottom=0.25)
@@ -118,19 +163,43 @@ def plot_evolution_progress(
     fig2, ax_left = plt.subplots(figsize=(8, 5))
     ax_left.set_xlabel("Generación")
     ax_left.set_ylabel("Training Soft Score")
-    sns.lineplot(x=generations, y=train_soft, label="Train Soft Score", color="#2c7bb6", ax=ax_left, legend=False)
+    sns.lineplot(
+        x=generations,
+        y=train_soft,
+        label="Train Soft Score",
+        color="#2c7bb6",
+        ax=ax_left,
+        legend=False,
+    )
 
     ax_right = ax_left.twinx()
     ax_right.set_ylabel("Validation Accuracy")
-    sns.lineplot(x=generations, y=val_acc, label="Val Acc", color="#d7191c", linestyle="--", ax=ax_right, legend=False)
+    sns.lineplot(
+        x=generations,
+        y=val_acc,
+        label="Val Acc",
+        color="#d7191c",
+        linestyle="--",
+        ax=ax_right,
+        legend=False,
+    )
 
-    ax_left.legend(handles=ax_left.get_lines() + ax_right.get_lines(),
-                   labels=[l.get_label() for l in ax_left.get_lines() + ax_right.get_lines()],
-                   loc="upper center", bbox_to_anchor=(0.5, -0.15), ncol=2, framealpha=1)
+    ax_left.legend(
+        handles=ax_left.get_lines() + ax_right.get_lines(),
+        labels=[l.get_label() for l in ax_left.get_lines() + ax_right.get_lines()],
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.15),
+        ncol=2,
+        framealpha=1,
+    )
 
     fig2.tight_layout()
     fig2.subplots_adjust(bottom=0.25)
-    fig2.savefig(output_dir / f"{output_stem}_train_vs_val.pdf", format="pdf", bbox_inches="tight")
+    fig2.savefig(
+        output_dir / f"{output_stem}_train_vs_val.pdf",
+        format="pdf",
+        bbox_inches="tight",
+    )
     plt.close(fig2)
 
 
@@ -207,8 +276,9 @@ def main() -> None:
     population_config = CONFIG["population"]
     variation_config = CONFIG["variation"]
     evolution_config = CONFIG["evolution"]
-    evaluation_config = CONFIG["evaluation"]
     execution_config = CONFIG.get("execution", {})
+    MAX_CHAMPION_RESETS = evolution_config.get("max_champion_resets", 2)
+    champion_reset_count = 0
 
     base_indpb = variation_config["mutation_indpb"]
     current_indpb = base_indpb
@@ -292,7 +362,6 @@ def main() -> None:
     logbook = tools.Logbook()
     logbook.header = [
         "gen",
-        "shots",
         "val_acc",
         "champion_acc",
         "best_depth",
@@ -313,7 +382,6 @@ def main() -> None:
     champion_thetas = {}
     stagnant_generations = 0
     champion_check_k = evolution_config.get("champion_check_k", 5)
-    champion_check_shots = evolution_config.get("champion_check_shots", 4096)
     patience_window = evolution_config.get("patience_window", max(1, patience // 4))
     recent_val_accs = deque(maxlen=patience_window)
     champion_smoothed_ever = 0.0
@@ -326,7 +394,6 @@ def main() -> None:
             evaluate_circuit,
             num_qubits=circuit_qubits,
             instances=training_data,
-            shots=evaluation_config["shots_start"],
             n_classes=n_classes,
             X_val=X_val_enc,
             y_val=y_val,
@@ -339,20 +406,12 @@ def main() -> None:
         gen_start_wall = time.perf_counter()
         gen_simulation_seconds = 0.0
 
-        progress = gen / (generations - 1) if generations > 1 else 1.0
-        current_shots = int(
-            evaluation_config["shots_start"]
-            + (evaluation_config["shots_end"] - evaluation_config["shots_start"])
-            * progress
-        )
-
         toolbox.register(
             "evaluate",
             functools.partial(
                 evaluate_circuit,
                 num_qubits=circuit_qubits,
                 instances=training_data,
-                shots=current_shots,
                 n_classes=n_classes,
                 X_val=X_val_enc,
                 y_val=y_val,
@@ -413,14 +472,13 @@ def main() -> None:
                 circuit_qubits,
                 X_val_enc,
                 y_val,
-                champion_check_shots,
                 n_classes,
                 seed_weights=getattr(val_ind, "stored_thetas", {}),
             )
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
                 best_val_ind = val_ind
-        true_val_acc, true_val_soft = best_val_acc, 0.0
+        true_val_acc = best_val_acc
         best_individual = best_val_ind or train_ranked[0]
         best_soft_dyn = -best_individual.fitness.values[0]
         best_depth = best_individual.fitness.values[1]
@@ -432,7 +490,6 @@ def main() -> None:
 
         logbook.record(
             gen=gen,
-            shots=current_shots,
             train_soft=best_soft_dyn,
             best_acc=true_val_acc,
             champion_acc=champion_val_acc_ever,
@@ -516,17 +573,25 @@ def main() -> None:
         )
 
         if stagnant_generations > patience // 2 and absolute_champion is not None:
-            # Round fitness values before comparing. Continuous-weight (rotation)
-            # circuits almost never produce exactly-equal floats even when the
-            # population has genuinely converged, which silently disabled this
-            # check. Binning to 3 decimals lets it fire for both approaches.
             unique_fitness = {
                 tuple(round(v, 3) for v in ind.fitness.values) for ind in population
             }
-            if len(unique_fitness) < mu // 4:
+            low_diversity = len(unique_fitness) < mu // 4
+            near_timeout = stagnant_generations >= patience - patience_window
+
+            if (
+                low_diversity or near_timeout
+            ) and champion_reset_count < MAX_CHAMPION_RESETS:
+                reason = (
+                    "Baja diversidad"
+                    if low_diversity
+                    else "Cerca del límite de paciencia"
+                )
+                champion_reset_count += 1
                 print(
-                    f"[DIVERSITY] Baja diversidad ({len(unique_fitness)} fit únicos). "
-                    f"Reiniciando población alrededor del campeón (gen {gen})"
+                    f"[DIVERSITY] {reason} ({len(unique_fitness)} fit únicos). "
+                    f"Reiniciando población alrededor del campeón "
+                    f"(gen {gen}, intento {champion_reset_count}/{MAX_CHAMPION_RESETS})"
                 )
                 keeper = toolbox.clone(absolute_champion)
                 new_pop = [keeper]
@@ -578,14 +643,11 @@ def main() -> None:
         absolute_champion = pareto_front[0]
         champion_thetas = getattr(absolute_champion, "stored_thetas", {})
 
-    final_shots = evaluation_config["final_validation_shots"]
-
     final_val_acc, final_val_soft = validate_circuit(
         absolute_champion,
         circuit_qubits,
         X_val_enc,
         y_val,
-        final_shots,
         n_classes,
         seed_weights=champion_thetas,
     )
@@ -594,7 +656,6 @@ def main() -> None:
         circuit_qubits,
         X_test_enc,
         y_test,
-        final_shots,
         n_classes,
         seed_weights=champion_thetas,
     )
@@ -735,44 +796,68 @@ if __name__ == "__main__":
     _explicit_dataset = _run_args.dataset is not None
     _explicit_approach = _run_args.approach is not None
 
-    _run_multi = (
-        not _explicit_dataset
-        and not _explicit_approach
-        and (
-            (_approaches and len(_approaches) > 1)
-            or (_datasets and len(_datasets) > 1)
+    if _run_args.approach == "both":
+        _dataset_to_use = _run_args.dataset or _config.get("qnn", {}).get(
+            "dataset", "iris"
         )
-        and "--internal" not in sys.argv
-    )
-
-    if _run_multi:
-        _orig_approach = _config.get("approach", (_approaches or ["clifford"])[0])
-        _orig_dataset = _config.get("qnn", {}).get(
-            "dataset", (_datasets or ["iris"])[0]
-        )
-
-        _dataset_list = _datasets if _datasets else [_orig_dataset]
-        _approach_list = _approaches if _approaches else [_orig_approach]
-
-        for _ds in _dataset_list:
-            for _a in _approach_list:
-                print(f"\n{'=' * 60}")
-                print(f"  Dataset: {_ds} | Approach: {_a}")
-                print(f"{'=' * 60}\n")
-                _result = subprocess.run(
-                    [
-                        sys.executable,
-                        __file__,
-                        "--internal",
-                        "--dataset",
-                        _ds,
-                        "--approach",
-                        _a,
-                    ]
+        for _a in ["clifford", "rotation"]:
+            print(f"\n{'=' * 60}")
+            print(f"  Dataset: {_dataset_to_use} | Approach: {_a}")
+            print(f"{'=' * 60}\n")
+            _result = subprocess.run(
+                [
+                    sys.executable,
+                    __file__,
+                    "--internal",
+                    "--dataset",
+                    _dataset_to_use,
+                    "--approach",
+                    _a,
+                ]
+            )
+            if _result.returncode != 0:
+                print(
+                    f"[ERROR] Dataset {_dataset_to_use} / Approach {_a} falló (código {_result.returncode})"
                 )
-                if _result.returncode != 0:
-                    print(
-                        f"[ERROR] Dataset {_ds} / Approach {_a} falló (código {_result.returncode})"
-                    )
     else:
-        main()
+        _run_multi = (
+            not _explicit_dataset
+            and not _explicit_approach
+            and (
+                (_approaches and len(_approaches) > 1)
+                or (_datasets and len(_datasets) > 1)
+            )
+            and "--internal" not in sys.argv
+        )
+
+        if _run_multi:
+            _orig_approach = _config.get("approach", (_approaches or ["clifford"])[0])
+            _orig_dataset = _config.get("qnn", {}).get(
+                "dataset", (_datasets or ["iris"])[0]
+            )
+
+            _dataset_list = _datasets if _datasets else [_orig_dataset]
+            _approach_list = _approaches if _approaches else [_orig_approach]
+
+            for _ds in _dataset_list:
+                for _a in _approach_list:
+                    print(f"\n{'=' * 60}")
+                    print(f"  Dataset: {_ds} | Approach: {_a}")
+                    print(f"{'=' * 60}\n")
+                    _result = subprocess.run(
+                        [
+                            sys.executable,
+                            __file__,
+                            "--internal",
+                            "--dataset",
+                            _ds,
+                            "--approach",
+                            _a,
+                        ]
+                    )
+                    if _result.returncode != 0:
+                        print(
+                            f"[ERROR] Dataset {_ds} / Approach {_a} falló (código {_result.returncode})"
+                        )
+        else:
+            main()

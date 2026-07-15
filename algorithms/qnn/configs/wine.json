@@ -21,17 +21,13 @@
         "guided_individual_length_min": 8,
         "guided_individual_length_factor": 4,
         "patience": 30,
-        "patience_window": 5,
+        "patience_window": 10,
         "improvement_epsilon": 0.0005,
         "champion_inheritance_prob": 0.6,
-        "champion_check_k": 3,
-        "champion_check_shots": 4096
+        "champion_check_k": 3
     },
     "evaluation": {
-        "shots_start": 2048,
-        "shots_end": 4096,
-        "final_validation_shots": 8192,
-        "cobyla_maxiter_factor": 14
+        "cobyla_maxiter_factor": 24
     },
     "encoding": {
         "enable_input_params": true,
