@@ -69,6 +69,12 @@ _ROTATION_SIMPLIFY_PM = PassManager(
     ]
 )
 
+_CLIFFORD_SIMPLIFY_PM = PassManager(
+    [
+        CommutativeCancellation(basis_gates=["h", "s", "cx"]),
+    ]
+)
+
 
 def _resolve_device(requested_device: str) -> str:
     if requested_device == "GPU":
@@ -176,10 +182,14 @@ def deserialize_architecture(data: list) -> EvolutionaryIndividual:
 
 
 def _effective_depth(qc: QuantumCircuit) -> int:
-    if APPROACH != "rotation":
+    if APPROACH == "rotation":
+        pm = _ROTATION_SIMPLIFY_PM
+    elif APPROACH == "clifford":
+        pm = _CLIFFORD_SIMPLIFY_PM
+    else:
         return qc.depth()
     try:
-        simplified = _ROTATION_SIMPLIFY_PM.run(qc)
+        simplified = pm.run(qc)
         return simplified.depth()
     except Exception:
         return qc.depth()
@@ -326,11 +336,10 @@ def _qnn_metrics(
         clf = LogisticRegression(
             C=0.5,
             solver="lbfgs",
-            max_iter=1000,
+            max_iter=200,
             random_state=RANDOM_SEED,
         )
-        n_splits = min(5, np.bincount(y_data).min())
-        n_splits = max(2, n_splits)
+        n_splits = 3
         probs = cross_val_predict(
             clf, X_exp_z, y_data, cv=n_splits, method="predict_proba"
         )
@@ -364,6 +373,7 @@ def evaluate_circuit(
     best_weights = {}
 
     simulation_seconds = 0.0
+    sim_start = time.perf_counter()
 
     if APPROACH == "rotation" and num_weights > 0:
         input_circuits = [
@@ -404,6 +414,7 @@ def evaluate_circuit(
             ]
             maxiter = max(30, maxiter // 3)
 
+        sim_start = time.perf_counter()
         best_result = None
         for x0 in starts:
             result = minimize(
@@ -424,7 +435,10 @@ def evaluate_circuit(
     X_train_batch = np.array([inst[0] for inst in instances])
     y_train_batch = np.array([inst[1] for inst in instances])
 
-    sim_start = time.perf_counter()
+    if APPROACH == "rotation" and num_weights > 0:
+        sim_end = time.perf_counter()
+        simulation_seconds += sim_end - sim_start
+        sim_start = sim_end
     _, soft_score = _qnn_metrics(
         individual,
         num_qubits,

@@ -24,10 +24,11 @@
         "patience_window": 10,
         "improvement_epsilon": 0.0005,
         "champion_inheritance_prob": 0.6,
-        "champion_check_k": 3
+        "champion_check_k": 4,
+        "max_champion_resets": 2
     },
     "evaluation": {
-        "cobyla_maxiter_factor": 30
+        "cobyla_maxiter_factor": 18
     },
     "encoding": {
         "enable_input_params": true,
