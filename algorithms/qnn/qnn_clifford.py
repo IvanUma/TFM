@@ -6,6 +6,7 @@ from typing import List, Set, Tuple, Union
 from qiskit import QuantumCircuit
 
 from . import qnn_common as common
+from .constants import CLIFFORD_GATES, REPS_MIN, REPS_MAX, BLOCK_HOF_REUSE_PROB, BLOCK_MIN_GATES, BLOCK_MAX_GATES, MUTATE_ACTION_PROB_1, MUTATE_ACTION_PROB_2
 
 BLOCK_HOF: List[List[Tuple]] = []
 
@@ -13,10 +14,6 @@ QuantumGen = Union[
     Tuple[str, int], Tuple[str, int, int], Tuple[str, int, List[Tuple], int]
 ]
 EvolutionaryIndividual = List[QuantumGen]
-
-CLIFFORD_GATES = ["H", "S", "CX"]
-REPS_MIN = 1
-REPS_MAX = 3
 
 
 def generate_random_gate(num_qubits: int) -> Tuple:
@@ -28,9 +25,9 @@ def generate_random_gate(num_qubits: int) -> Tuple:
 
 
 def generate_random_block(num_qubits: int) -> List[Tuple]:
-    if len(BLOCK_HOF) > 0 and random.random() < 0.3:
+    if len(BLOCK_HOF) > 0 and random.random() < BLOCK_HOF_REUSE_PROB:
         return list(random.choice(BLOCK_HOF))
-    length = random.randint(2, 6)
+    length = random.randint(BLOCK_MIN_GATES, BLOCK_MAX_GATES)
     block = [generate_random_gate(num_qubits) for _ in range(length)]
     return common.simplify_gate_sequence(block, num_qubits)
 
@@ -107,10 +104,10 @@ def mut_quantum_circuit(
             if gen[0] == "PARAM_BLOCK":
                 param_idx, block_gates, reps = gen[1], gen[2], gen[3]
                 action_roll = random.random()
-                if action_roll < 0.34:
+                if action_roll < MUTATE_ACTION_PROB_1:
                     new_block = mutate_block_structure(list(block_gates), num_qubits)
                     individual[i] = ("PARAM_BLOCK", param_idx, new_block, reps)
-                elif action_roll < 0.67:
+                elif action_roll < MUTATE_ACTION_PROB_2:
                     new_block = generate_random_block(num_qubits)
                     individual[i] = ("PARAM_BLOCK", param_idx, new_block, reps)
                 else:

@@ -9,6 +9,8 @@ from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 
+from .constants import _BUCKET_EDGES, CIRCUIT_NORM_THRESHOLD
+
 logger = logging.getLogger(__name__)
 
 QNN_DATASETS = {
@@ -32,14 +34,11 @@ QNN_DATASETS = {
     },
 }
 
-_BUCKET_EDGES = [-0.67, 0.0, 0.67]
-CLIFFORD_ANGLE_LEVELS = [0.0, np.pi / 2, np.pi, 3 * np.pi / 2]
-
 
 def _amplitude_encoding(features: np.ndarray) -> np.ndarray:
     state = features.astype(complex)
     norm = np.linalg.norm(state)
-    if norm > 1e-12:
+    if norm > CIRCUIT_NORM_THRESHOLD:
         state /= norm
     else:
         state[0] = 1.0

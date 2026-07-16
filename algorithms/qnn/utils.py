@@ -1,11 +1,8 @@
 from __future__ import annotations
 
 import functools
-import importlib
-import json
 import logging
 import time
-from pathlib import Path
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -18,40 +15,28 @@ from qiskit.transpiler.passes import (
     CommutativeCancellation,
     Optimize1qGatesDecomposition,
 )
-from qiskit.quantum_info import Statevector, StabilizerState
+from qiskit.quantum_info import Statevector, StabilizerState, Operator
 from scipy.optimize import minimize
 
 from . import qnn_common as common
+from . import config as _qnn_config
+
+cx_quantum_circuit = _qnn_config.cx_quantum_circuit
+from .constants import (
+    SIGMOID_BETA,
+    READOUT_C,
+    READOUT_MAX_ITER,
+    READOUT_CV_SPLITS,
+    COBYLA_RHOBEG,
+    COBYLA_MIN_MAXITER,
+    COBYLA_MIN_MAXITER_NO_INHERIT,
+    COBYLA_RANDOM_STARTS,
+    COBYLA_MAXITER_FACTOR_DEFAULT,
+    NUMERICAL_EPS,
+    BLOCK_HOF_MAXLEN,
+)
 
 logger = logging.getLogger(__name__)
-
-_CONFIG = None
-CONFIG = None
-CONFIG_PATH = None
-APPROACH = None
-RANDOM_SEED = None
-DATASET_NAME = None
-TEST_SPLIT = None
-VAL_SPLIT = None
-ENABLE_INPUT_PARAMS = None
-PARAM_BLOCK_PROB = None
-MANUAL_INPUT_VALUES = None
-NUM_PARAMS = None
-SIMULATOR_DEVICE = None
-_ENCODING_MODE = None
-_RANDOM_GENERATOR = None
-_STATEVECTOR_THREADS = None
-
-q_strategy = None
-EvolutionaryIndividual = None
-build_quantum_circuit = None
-get_param_indices = None
-generate_guided_individual = None
-mut_quantum_circuit = None
-serialize_individual = None
-deserialize_individual = None
-
-cx_quantum_circuit = common.cx_quantum_circuit
 
 
 def _deep_tuple(obj):
@@ -76,79 +61,11 @@ _CLIFFORD_SIMPLIFY_PM = PassManager(
 )
 
 
-def _resolve_device(requested_device: str) -> str:
-    if requested_device == "GPU":
-        logger.warning(
-            "El cálculo ahora es exacto vía Statevector/StabilizerState (numpy, solo CPU); "
-            "se ignora la solicitud de GPU."
-        )
-    return "CPU"
-
-
-def init_config(dataset_name: str, approach: str | None = None) -> None:
-    global _CONFIG, CONFIG, CONFIG_PATH, APPROACH, RANDOM_SEED, DATASET_NAME
-    global TEST_SPLIT, VAL_SPLIT, ENABLE_INPUT_PARAMS, PARAM_BLOCK_PROB
-    global MANUAL_INPUT_VALUES, NUM_PARAMS, SIMULATOR_DEVICE
-    global _ENCODING_MODE, _RANDOM_GENERATOR, _STATEVECTOR_THREADS
-    global q_strategy, EvolutionaryIndividual, build_quantum_circuit
-    global get_param_indices, generate_guided_individual, mut_quantum_circuit
-    global serialize_individual, deserialize_individual
-
-    config_dir = Path(__file__).parent / "configs"
-    config_path = config_dir / f"{dataset_name}.json"
-    if not config_path.exists():
-        config_path = Path(__file__).with_name("config.json")
-    CONFIG_PATH = config_path
-
-    with open(config_path, "r", encoding="utf-8") as f:
-        _CONFIG = json.load(f)
-    CONFIG = _CONFIG
-
-    APPROACH = _CONFIG["approach"]
-    if approach is not None:
-        APPROACH = approach
-    RANDOM_SEED = int(_CONFIG.get("random_seed", 42))
-    _RANDOM_GENERATOR = np.random.default_rng(RANDOM_SEED)
-
-    _qnn_cfg = _CONFIG.get("qnn", {})
-    DATASET_NAME = _qnn_cfg.get("dataset", dataset_name)
-    TEST_SPLIT = float(_qnn_cfg.get("test_split", 0.2))
-    VAL_SPLIT = float(_qnn_cfg.get("val_split", 0.2))
-
-    _encoding_cfg = _CONFIG.get("encoding", {})
-    ENABLE_INPUT_PARAMS = _encoding_cfg.get("enable_input_params", False)
-    PARAM_BLOCK_PROB = _encoding_cfg.get("param_block_prob", 0.15)
-
-    _manual_input_values = _encoding_cfg.get("manual_input_values", [1.0])
-    if not isinstance(_manual_input_values, list) or len(_manual_input_values) == 0:
-        raise ValueError(
-            "encoding.manual_input_values must be a non-empty list of numbers"
-        )
-    MANUAL_INPUT_VALUES = [float(v) for v in _manual_input_values]
-    NUM_PARAMS = len(MANUAL_INPUT_VALUES)
-
-    q_strategy = importlib.import_module(f".qnn_{APPROACH}", package=__package__)
-    EvolutionaryIndividual = q_strategy.EvolutionaryIndividual
-    build_quantum_circuit = q_strategy.build_quantum_circuit
-    get_param_indices = q_strategy.get_param_indices
-    generate_guided_individual = q_strategy.generate_guided_individual
-    mut_quantum_circuit = q_strategy.mut_quantum_circuit
-    serialize_individual = q_strategy.serialize_individual
-    deserialize_individual = q_strategy.deserialize_individual
-
-    _execution_cfg = _CONFIG.get("execution", {})
-    _STATEVECTOR_THREADS = _execution_cfg.get("statevector_max_parallel_threads", 0)
-    _REQUESTED_DEVICE = _execution_cfg.get("device", "auto")
-    SIMULATOR_DEVICE = _resolve_device(_REQUESTED_DEVICE)
-
-    _ENCODING_MODE = "clifford_angle" if APPROACH == "clifford" else "amplitude"
-
-
 def _prepare_input_circuit(
     num_qubits: int, encoded_sample: np.ndarray
 ) -> QuantumCircuit:
     qc = QuantumCircuit(num_qubits)
-    if _ENCODING_MODE == "clifford_angle":
+    if _qnn_config._ENCODING_MODE == "clifford_angle":
         buckets = encoded_sample.astype(int)
         for q in range(num_qubits):
             level = buckets[q]
@@ -168,23 +85,23 @@ def _prepare_input_circuit(
 
 
 def describe_architecture(individual: EvolutionaryIndividual) -> dict:
-    if APPROACH == "clifford":
-        return {"blocks": q_strategy.describe_blocks(individual)}
-    return {"param_genes": q_strategy.describe_param_genes(individual)}
+    if _qnn_config.APPROACH == "clifford":
+        return {"blocks": _qnn_config.q_strategy.describe_blocks(individual)}
+    return {"param_genes": _qnn_config.q_strategy.describe_param_genes(individual)}
 
 
 def serialize_architecture(individual: EvolutionaryIndividual) -> list:
-    return serialize_individual(individual)
+    return _qnn_config.serialize_individual(individual)
 
 
 def deserialize_architecture(data: list) -> EvolutionaryIndividual:
-    return deserialize_individual(data)
+    return _qnn_config.deserialize_individual(data)
 
 
 def _effective_depth(qc: QuantumCircuit) -> int:
-    if APPROACH == "rotation":
+    if _qnn_config.APPROACH == "rotation":
         pm = _ROTATION_SIMPLIFY_PM
-    elif APPROACH == "clifford":
+    elif _qnn_config.APPROACH == "clifford":
         pm = _CLIFFORD_SIMPLIFY_PM
     else:
         return qc.depth()
@@ -207,7 +124,7 @@ def _expectation_z_from_probs(probs: np.ndarray, num_qubits: int) -> np.ndarray:
 
 
 def _exact_probabilities(qc: QuantumCircuit) -> np.ndarray:
-    if APPROACH == "clifford":
+    if _qnn_config.APPROACH == "clifford":
         return StabilizerState(qc).probabilities()
     return Statevector.from_instruction(qc).probabilities()
 
@@ -218,7 +135,7 @@ def _exact_expectation_z(qc: QuantumCircuit, num_qubits: int) -> np.ndarray:
 
 
 def _exp_z_to_class_probs(
-    exp_z: np.ndarray, n_classes: int, beta: float = 5.0
+    exp_z: np.ndarray, n_classes: int, beta: float = SIGMOID_BETA
 ) -> np.ndarray:
     if len(exp_z) == 0:
         return np.ones(n_classes) / n_classes
@@ -238,6 +155,41 @@ def _exp_z_to_class_probs(
     return probs
 
 
+_SIGN_MATRIX_CACHE: Dict[int, np.ndarray] = {}
+
+
+def _get_sign_matrix(num_qubits: int) -> np.ndarray:
+    if num_qubits not in _SIGN_MATRIX_CACHE:
+        dim = 2**num_qubits
+        signs = np.empty((dim, num_qubits))
+        for idx in range(dim):
+            bits = format(idx, f"0{num_qubits}b")
+            for q in range(num_qubits):
+                signs[idx, q] = 1.0 if bits[q] == "0" else -1.0
+        _SIGN_MATRIX_CACHE[num_qubits] = signs
+    return _SIGN_MATRIX_CACHE[num_qubits]
+
+
+@functools.lru_cache(maxsize=4096)
+def _get_input_statevector(num_qubits: int, encoded_tuple: tuple) -> np.ndarray:
+    qc = _prepare_input_circuit(num_qubits, np.array(encoded_tuple))
+    return Statevector.from_instruction(qc).data
+
+
+_CLIFFORD_INPUT_CACHE: Dict[Tuple, np.ndarray] = {}
+
+
+def _get_clifford_input_matrix(X_data: np.ndarray, num_qubits: int) -> np.ndarray:
+    key = (num_qubits, X_data.shape[0])
+    if key not in _CLIFFORD_INPUT_CACHE:
+        _CLIFFORD_INPUT_CACHE[key] = np.array([
+            Statevector.from_instruction(
+                _prepare_input_circuit(num_qubits, x)
+            ).data for x in X_data
+        ])
+    return _CLIFFORD_INPUT_CACHE[key]
+
+
 @functools.lru_cache(maxsize=500)
 def _get_rotation_ansatz(
     individual_tuple: tuple, num_qubits: int, sorted_indices_tuple: tuple
@@ -250,8 +202,8 @@ def _get_rotation_ansatz(
             _, p_type, p_idx, rot_gate, qubit = gen
             if p_type == "INPUT":
                 theta = (
-                    MANUAL_INPUT_VALUES[p_idx % len(MANUAL_INPUT_VALUES)]
-                    if MANUAL_INPUT_VALUES
+                    _qnn_config.MANUAL_INPUT_VALUES[p_idx % len(_qnn_config.MANUAL_INPUT_VALUES)]
+                    if _qnn_config.MANUAL_INPUT_VALUES
                     else 0.0
                 )
             else:
@@ -272,10 +224,10 @@ def _get_clifford_ansatz(
     individual_tuple: tuple, num_qubits: int, quantized_weights: tuple
 ):
     weight_map = dict(quantized_weights)
-    return build_quantum_circuit(
+    return _qnn_config.build_quantum_circuit(
         list(individual_tuple),
         num_qubits,
-        MANUAL_INPUT_VALUES,
+        _qnn_config.MANUAL_INPUT_VALUES,
         weight_map,
         measure=False,
     )
@@ -289,7 +241,7 @@ def _build_ansatz_circuit(
 ) -> QuantumCircuit:
     individual_tuple = _deep_tuple(individual)
 
-    if APPROACH == "rotation":
+    if _qnn_config.APPROACH == "rotation":
         indices_tuple = tuple(sorted_weight_indices)
         qc, param_objs = _get_rotation_ansatz(
             individual_tuple, num_qubits, indices_tuple
@@ -318,37 +270,41 @@ def _qnn_metrics(
     if total == 0:
         return 0.0, 0.0
 
-    _, weight_indices = get_param_indices(individual)
+    _, weight_indices = _qnn_config.get_param_indices(individual)
     sorted_weight_indices = sorted(weight_indices)
     ansatz = _build_ansatz_circuit(
         individual, num_qubits, sorted_weight_indices, weight_map
     )
 
-    exp_z_list = []
-    for i in range(total):
-        qc = _prepare_input_circuit(num_qubits, X_data[i])
-        qc.compose(ansatz, inplace=True)
-        exp_z_list.append(_exact_expectation_z(qc, num_qubits))
-    X_exp_z = np.array(exp_z_list)
+    if _qnn_config.APPROACH == "rotation":
+        input_state_matrix = np.array([
+            _get_input_statevector(num_qubits, tuple(x)) for x in X_data
+        ])
+    else:
+        input_state_matrix = _get_clifford_input_matrix(X_data, num_qubits)
+    sign_matrix = _get_sign_matrix(num_qubits)
+    U = Operator(ansatz).data
+    evolved = input_state_matrix @ U.T
+    probs_sv = np.abs(evolved) ** 2
+    X_exp_z = probs_sv @ sign_matrix
 
     stored_clf = getattr(individual, "_readout_clf", None)
     if use_logistic:
         clf = LogisticRegression(
-            C=0.5,
+            C=READOUT_C,
             solver="lbfgs",
-            max_iter=200,
-            random_state=RANDOM_SEED,
+            max_iter=READOUT_MAX_ITER,
+            random_state=_qnn_config.RANDOM_SEED,
         )
-        n_splits = 3
         probs = cross_val_predict(
-            clf, X_exp_z, y_data, cv=n_splits, method="predict_proba"
+            clf, X_exp_z, y_data, cv=READOUT_CV_SPLITS, method="predict_proba"
         )
         clf.fit(X_exp_z, y_data)
         individual._readout_clf = clf
     elif stored_clf is not None:
         probs = stored_clf.predict_proba(X_exp_z)
     else:
-        probs = np.array([_exp_z_to_class_probs(ez, n_classes) for ez in exp_z_list])
+        probs = np.array([_exp_z_to_class_probs(ez, n_classes) for ez in X_exp_z])
     correct = int(np.sum(np.argmax(probs, axis=1) == y_data))
     soft_score = float(np.mean(probs[np.arange(total), y_data]))
     return correct / total, soft_score
@@ -362,7 +318,7 @@ def evaluate_circuit(
     X_val: np.ndarray,
     y_val: np.ndarray,
 ) -> Tuple[Tuple[float, float], Dict[int, float], List[list], float]:
-    _, weight_indices_set = get_param_indices(individual)
+    _, weight_indices_set = _qnn_config.get_param_indices(individual)
     sorted_weight_indices = sorted(weight_indices_set)
     num_weights = len(sorted_weight_indices)
 
@@ -375,31 +331,35 @@ def evaluate_circuit(
     simulation_seconds = 0.0
     sim_start = time.perf_counter()
 
-    if APPROACH == "rotation" and num_weights > 0:
-        input_circuits = [
-            _prepare_input_circuit(num_qubits, features) for features, _ in instances
-        ]
+    if _qnn_config.APPROACH == "rotation" and num_weights > 0:
+        input_state_matrix = np.array([
+            _get_input_statevector(num_qubits, tuple(features))
+            for features, _ in instances
+        ])
+        labels_arr = np.array([label for _, label in instances])
+        sign_matrix = _get_sign_matrix(num_qubits)
 
         def objective(weight_vector) -> float:
             weight_map = dict(zip(sorted_weight_indices, weight_vector))
             ansatz = _build_ansatz_circuit(
                 individual, num_qubits, sorted_weight_indices, weight_map
             )
+            U = Operator(ansatz).data
 
-            eps = 1e-12
+            evolved = input_state_matrix @ U.T
+            probs = np.abs(evolved) ** 2
+            exp_z = probs @ sign_matrix
+
             loss = 0.0
-            for base_qc, (_, label) in zip(input_circuits, instances):
-                qc = base_qc.copy()
-                qc.compose(ansatz, inplace=True)
-                exp_z = _exact_expectation_z(qc, num_qubits)
-                class_probs = _exp_z_to_class_probs(exp_z, n_classes)
-                loss -= np.log(class_probs[label] + eps)
+            for ez, label in zip(exp_z, labels_arr):
+                class_probs = _exp_z_to_class_probs(ez, n_classes)
+                loss -= np.log(class_probs[label] + NUMERICAL_EPS)
             return loss / len(instances) if instances else 0.0
 
+        cobyla_factor = _qnn_config._CONFIG.get("evaluation", {}).get("cobyla_maxiter_factor", COBYLA_MAXITER_FACTOR_DEFAULT)
         maxiter = max(
-            50,
-            num_weights
-            * _CONFIG.get("evaluation", {}).get("cobyla_maxiter_factor", 15),
+            COBYLA_MIN_MAXITER,
+            num_weights * cobyla_factor,
         )
 
         if inherited:
@@ -407,12 +367,10 @@ def evaluate_circuit(
             starts = [x0]
         else:
             starts = [
-                _RANDOM_GENERATOR.uniform(-np.pi, np.pi, size=num_weights),
-                _RANDOM_GENERATOR.uniform(-np.pi, np.pi, size=num_weights),
-                _RANDOM_GENERATOR.uniform(-np.pi, np.pi, size=num_weights),
-                _RANDOM_GENERATOR.uniform(-np.pi, np.pi, size=num_weights),
+                _qnn_config._RANDOM_GENERATOR.uniform(-np.pi, np.pi, size=num_weights)
+                for _ in range(COBYLA_RANDOM_STARTS)
             ]
-            maxiter = max(30, maxiter // 3)
+            maxiter = max(COBYLA_MIN_MAXITER_NO_INHERIT, maxiter // 3)
 
         sim_start = time.perf_counter()
         best_result = None
@@ -421,7 +379,7 @@ def evaluate_circuit(
                 objective,
                 x0=x0,
                 method="COBYLA",
-                options={"maxiter": maxiter, "rhobeg": 1.5},
+                options={"maxiter": maxiter, "rhobeg": COBYLA_RHOBEG},
             )
             if best_result is None or result.fun < best_result.fun:
                 best_result = result
@@ -435,7 +393,7 @@ def evaluate_circuit(
     X_train_batch = np.array([inst[0] for inst in instances])
     y_train_batch = np.array([inst[1] for inst in instances])
 
-    if APPROACH == "rotation" and num_weights > 0:
+    if _qnn_config.APPROACH == "rotation" and num_weights > 0:
         sim_end = time.perf_counter()
         simulation_seconds += sim_end - sim_start
         sim_start = sim_end
@@ -450,12 +408,13 @@ def evaluate_circuit(
     simulation_seconds += time.perf_counter() - sim_start
 
     depth = _effective_depth(
-        build_quantum_circuit(
-            individual, num_qubits, MANUAL_INPUT_VALUES, best_weights, measure=False
+        _qnn_config.build_quantum_circuit(
+            individual, num_qubits, _qnn_config.MANUAL_INPUT_VALUES, best_weights, measure=False
         )
     )
 
-    depth_obj = float(depth)
+    depth_power = float(_qnn_config._CONFIG.get("evolution", {}).get("depth_power", 1.2))
+    depth_obj = float(depth) ** depth_power
 
     readout_data = getattr(individual, "_readout_clf", None)
     return ((-soft_score, depth_obj), best_weights, readout_data, simulation_seconds)
@@ -469,6 +428,8 @@ def validate_circuit(
     n_classes: int,
     seed_weights: dict | None = None,
 ) -> Tuple[float, float]:
+    if seed_weights is None:
+        seed_weights = getattr(individual, "stored_thetas", {})
     best_weights = seed_weights if seed_weights is not None else {}
 
     val_acc, soft_score = _qnn_metrics(
@@ -484,9 +445,9 @@ def validate_circuit(
 
 
 def update_hof(block_gates: list) -> None:
-    if APPROACH != "clifford":
+    if _qnn_config.APPROACH != "clifford":
         return
-    if block_gates not in q_strategy.BLOCK_HOF:
-        q_strategy.BLOCK_HOF.append(block_gates)
-    if len(q_strategy.BLOCK_HOF) > 100:
-        q_strategy.BLOCK_HOF.pop(0)
+    if block_gates not in _qnn_config.q_strategy.BLOCK_HOF:
+        _qnn_config.q_strategy.BLOCK_HOF.append(block_gates)
+    if len(_qnn_config.q_strategy.BLOCK_HOF) > BLOCK_HOF_MAXLEN:
+        _qnn_config.q_strategy.BLOCK_HOF.pop(0)

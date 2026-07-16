@@ -14,19 +14,9 @@ from multiprocessing import Pool
 from pathlib import Path
 from typing import List, Tuple
 
-import matplotlib
-import matplotlib.pyplot as plt
 import numpy as np
-import seaborn as sns
 from deap import algorithms, base, creator, tools
 from qiskit import qpy
-
-matplotlib.use("Agg")
-
-sns.set_theme(style="whitegrid", context="paper", font_scale=1.2)
-plt.rcParams["figure.dpi"] = 300
-plt.rcParams["savefig.dpi"] = 300
-plt.rcParams["font.family"] = "serif"
 
 if not hasattr(creator, "MultiFitness"):
     creator.create("MultiFitness", base.Fitness, weights=(-1.0, -1.0))
@@ -37,37 +27,35 @@ toolbox: base.Toolbox = base.Toolbox()
 
 
 def _init_worker(dataset_name: str, approach: str) -> None:
-    from algorithms.qnn import utils as qnn_utils
+    from algorithms.qnn.config import init_config
 
-    qnn_utils.init_config(dataset_name, approach)
-
-
-def cpu_seconds_snapshot() -> float:
-    times = os.times()
-    return times.user + times.system + times.children_user + times.children_system
+    init_config(dataset_name, approach)
 
 
 def evaluate_population(
     individuals, toolbox, champion_weights=None
 ) -> Tuple[int, float]:
-    from algorithms.qnn.utils import CONFIG
+    from algorithms.qnn.config import CONFIG
+    from algorithms.qnn.constants import WEIGHT_INHERITANCE_NOISE_STD, WEIGHT_INHERITANCE_MIN_PROB
 
     invalid = [ind for ind in individuals if not ind.fitness.valid]
     if not invalid:
         return 0, 0.0
 
     inheritance_prob = CONFIG["evolution"].get("champion_inheritance_prob", 0.15)
-    inheritance_prob = max(inheritance_prob, 0.6)
+    inheritance_prob = max(inheritance_prob, WEIGHT_INHERITANCE_MIN_PROB)
 
     for ind in invalid:
         own_prior = getattr(ind, "stored_thetas", None)
         if own_prior:
             ind._seed_weights = {
-                k: v + random.gauss(0, 0.05) for k, v in own_prior.items()
+                k: v + random.gauss(0, WEIGHT_INHERITANCE_NOISE_STD)
+                for k, v in own_prior.items()
             }
         elif champion_weights is not None and random.random() < inheritance_prob:
             noise = {
-                k: v + (random.gauss(0, 0.05)) for k, v in champion_weights.items()
+                k: v + random.gauss(0, WEIGHT_INHERITANCE_NOISE_STD)
+                for k, v in champion_weights.items()
             }
             ind._seed_weights = noise
 
@@ -89,120 +77,6 @@ def evaluate_population(
     return len(invalid), batch_simulation_seconds
 
 
-def plot_evolution_progress(
-    generations,
-    train_soft,
-    val_acc,
-    val_champion,
-    depth_per_gen,
-    depth_champion,
-    val_champion_best,
-    depth_champion_best,
-    train_best,
-    val_best,
-    approach,
-    output_stem,
-    output_dir,
-):
-    fig, ax1 = plt.subplots(figsize=(8, 5))
-    ax1.set_xlabel("Generación")
-    ax1.set_ylabel("Accuracy")
-
-    sns.lineplot(
-        x=generations,
-        y=val_acc,
-        label="Per-Gen Best",
-        color="#2c7bb6",
-        linestyle=":",
-        ax=ax1,
-        legend=False,
-    )
-    sns.lineplot(
-        x=generations,
-        y=val_champion,
-        label="Best-ever Champion",
-        color="#d7191c",
-        ax=ax1,
-        legend=False,
-    )
-
-    ax2 = ax1.twinx()
-    ax2.set_ylabel("Profundidad (Depth)")
-    sns.lineplot(
-        x=generations,
-        y=depth_per_gen,
-        label="Per-Gen Depth",
-        color="#fdae61",
-        linestyle=":",
-        ax=ax2,
-        legend=False,
-    )
-    sns.lineplot(
-        x=generations,
-        y=depth_champion,
-        label="Champion Depth",
-        color="#fdae61",
-        ax=ax2,
-        legend=False,
-    )
-
-    ax1.legend(
-        handles=ax1.get_lines() + ax2.get_lines(),
-        labels=[l.get_label() for l in ax1.get_lines() + ax2.get_lines()],
-        loc="upper center",
-        bbox_to_anchor=(0.5, -0.15),
-        ncol=2,
-        framealpha=1,
-    )
-
-    fig.tight_layout()
-    fig.subplots_adjust(bottom=0.25)
-    fig.savefig(output_dir / f"{output_stem}.pdf", format="pdf", bbox_inches="tight")
-    plt.close(fig)
-
-    fig2, ax_left = plt.subplots(figsize=(8, 5))
-    ax_left.set_xlabel("Generación")
-    ax_left.set_ylabel("Training Soft Score")
-    sns.lineplot(
-        x=generations,
-        y=train_soft,
-        label="Train Soft Score",
-        color="#2c7bb6",
-        ax=ax_left,
-        legend=False,
-    )
-
-    ax_right = ax_left.twinx()
-    ax_right.set_ylabel("Validation Accuracy")
-    sns.lineplot(
-        x=generations,
-        y=val_acc,
-        label="Val Acc",
-        color="#d7191c",
-        linestyle="--",
-        ax=ax_right,
-        legend=False,
-    )
-
-    ax_left.legend(
-        handles=ax_left.get_lines() + ax_right.get_lines(),
-        labels=[l.get_label() for l in ax_left.get_lines() + ax_right.get_lines()],
-        loc="upper center",
-        bbox_to_anchor=(0.5, -0.15),
-        ncol=2,
-        framealpha=1,
-    )
-
-    fig2.tight_layout()
-    fig2.subplots_adjust(bottom=0.25)
-    fig2.savefig(
-        output_dir / f"{output_stem}_train_vs_val.pdf",
-        format="pdf",
-        bbox_inches="tight",
-    )
-    plt.close(fig2)
-
-
 def main() -> None:
     project_root = Path(__file__).resolve().parents[2]
     sys.path.insert(0, str(project_root))
@@ -214,8 +88,6 @@ def main() -> None:
     _main_parser.add_argument("--dataset", type=str, default=None)
     _main_args, _ = _main_parser.parse_known_args()
 
-    from algorithms.qnn import utils as qnn_utils
-
     _dataset = _main_args.dataset
     _approach = _main_args.approach
     if _dataset is None:
@@ -226,43 +98,44 @@ def main() -> None:
         if _approach is None:
             _approach = _default_cfg.get("approach", "rotation")
 
-    qnn_utils.init_config(_dataset, approach=_approach)
-
+    from algorithms.qnn import config as qnn_config
+    from algorithms.qnn.constants import (
+        N_IMMIGRANTS_DIVISOR,
+        N_IMMIGRANTS_MIN,
+        CHAMPION_IMMIGRANT_PROB,
+        MUTATION_ADAPT_PATIENCE_DIVISOR,
+        MUTATION_ADAPT_SCALE,
+        DIVERSITY_UNIQUE_FIT_ROUND,
+        RESET_MUTATED_RATIO,
+    )
+    from algorithms.qnn.plotting import plot_evolution_progress
+    from algorithms.qnn.qnn_data import load_qnn_data
     from algorithms.qnn.utils import (
-        APPROACH,
-        CONFIG,
-        CONFIG_PATH,
-        DATASET_NAME,
-        ENABLE_INPUT_PARAMS,
-        MANUAL_INPUT_VALUES,
-        NUM_PARAMS,
-        PARAM_BLOCK_PROB,
-        TEST_SPLIT,
-        VAL_SPLIT,
-        SIMULATOR_DEVICE,
-        build_quantum_circuit,
         cx_quantum_circuit,
         describe_architecture,
         evaluate_circuit,
-        generate_guided_individual,
-        mut_quantum_circuit,
         serialize_architecture,
         validate_circuit,
         _effective_depth,
     )
-    from algorithms.qnn.qnn_data import load_qnn_data
 
-    if not CONFIG_PATH.exists():
-        print(f"[ERROR] Config file not found: {CONFIG_PATH}")
+    qnn_config.init_config(_dataset, approach=_approach)
+
+    build_quantum_circuit = qnn_config.build_quantum_circuit
+    generate_guided_individual = qnn_config.generate_guided_individual
+    mut_quantum_circuit = qnn_config.mut_quantum_circuit
+
+    if not qnn_config.CONFIG_PATH.exists():
+        print(f"[ERROR] Config file not found: {qnn_config.CONFIG_PATH}")
         return
 
-    dataset_name = DATASET_NAME
-    encoding_mode = "clifford_angle" if APPROACH == "clifford" else "amplitude"
+    dataset_name = qnn_config.DATASET_NAME
+    encoding_mode = "clifford_angle" if qnn_config.APPROACH == "clifford" else "amplitude"
     X_train_enc, y_train, X_val_enc, y_val, X_test_enc, y_test, dataset_info = (
         load_qnn_data(
             dataset_name,
-            test_split=TEST_SPLIT,
-            val_split=VAL_SPLIT,
+            test_split=qnn_config.TEST_SPLIT,
+            val_split=qnn_config.VAL_SPLIT,
             random_state=42,
             encoding_mode=encoding_mode,
         )
@@ -273,10 +146,10 @@ def main() -> None:
 
     training_data = list(zip(X_train_enc, y_train))
 
-    population_config = CONFIG["population"]
-    variation_config = CONFIG["variation"]
-    evolution_config = CONFIG["evolution"]
-    execution_config = CONFIG.get("execution", {})
+    population_config = qnn_config.CONFIG["population"]
+    variation_config = qnn_config.CONFIG["variation"]
+    evolution_config = qnn_config.CONFIG["evolution"]
+    execution_config = qnn_config.CONFIG.get("execution", {})
     MAX_CHAMPION_RESETS = evolution_config.get("max_champion_resets", 2)
     champion_reset_count = 0
 
@@ -292,9 +165,9 @@ def main() -> None:
             evolution_config["guided_individual_length_min"],
             circuit_qubits * evolution_config["guided_individual_length_factor"],
         ),
-        max_params=NUM_PARAMS,
-        enable_input_params=ENABLE_INPUT_PARAMS,
-        param_block_prob=PARAM_BLOCK_PROB,
+        max_params=qnn_config.NUM_PARAMS,
+        enable_input_params=qnn_config.ENABLE_INPUT_PARAMS,
+        param_block_prob=qnn_config.PARAM_BLOCK_PROB,
     )
 
     toolbox.register("population", tools.initRepeat, list, toolbox.individual)
@@ -307,16 +180,16 @@ def main() -> None:
         mut_quantum_circuit,
         num_qubits=circuit_qubits,
         indpb=current_indpb,
-        max_params=NUM_PARAMS,
-        enable_input_params=ENABLE_INPUT_PARAMS,
-        param_block_prob=PARAM_BLOCK_PROB,
+        max_params=qnn_config.NUM_PARAMS,
+        enable_input_params=qnn_config.ENABLE_INPUT_PARAMS,
+        param_block_prob=qnn_config.PARAM_BLOCK_PROB,
     )
     toolbox.register("select", tools.selNSGA2)
 
     use_multiprocessing = execution_config.get("multiprocessing", True)
     requested_processes = execution_config.get("processes")
     if not requested_processes:
-        if SIMULATOR_DEVICE == "GPU":
+        if qnn_config.SIMULATOR_DEVICE == "GPU":
             requested_processes = 2
         else:
             cpu_total = os.cpu_count() or 1
@@ -342,10 +215,10 @@ def main() -> None:
         f"Training: {dataset_info['n_train']} | Validation: {dataset_info['n_val']} | Test: {dataset_info['n_test']}"
     )
     print(
-        f"Approach: {APPROACH.upper()} | Processes: {requested_processes if pool is not None else 1}"
+        f"Approach: {qnn_config.APPROACH.upper()} | Processes: {requested_processes if pool is not None else 1}"
     )
-    sim_method = "stabilizer" if APPROACH == "clifford" else "statevector"
-    print(f"Simulator: {sim_method} on {SIMULATOR_DEVICE}\n")
+    sim_method = "stabilizer" if qnn_config.APPROACH == "clifford" else "statevector"
+    print(f"Simulator: {sim_method} on {qnn_config.SIMULATOR_DEVICE}\n")
 
     mu = population_config["mu"]
     lambda_ = population_config["lambda"]
@@ -429,20 +302,20 @@ def main() -> None:
         gen_simulation_seconds += seconds_spent
 
         if stagnant_generations > patience // 4:
-            n_immigrants = max(4, mu // 3)
+            n_immigrants = max(N_IMMIGRANTS_MIN, mu // N_IMMIGRANTS_DIVISOR)
             immigrants = [
                 creator.MultiIndividual(toolbox.individual())
                 for _ in range(n_immigrants)
             ]
-            if absolute_champion is not None and random.random() < 0.5:
+            if absolute_champion is not None and random.random() < CHAMPION_IMMIGRANT_PROB:
                 champion_copy = toolbox.clone(absolute_champion)
                 mut_quantum_circuit(
                     champion_copy,
                     circuit_qubits,
                     0.5,
-                    max_params=NUM_PARAMS,
-                    enable_input_params=ENABLE_INPUT_PARAMS,
-                    param_block_prob=PARAM_BLOCK_PROB,
+                    max_params=qnn_config.NUM_PARAMS,
+                    enable_input_params=qnn_config.ENABLE_INPUT_PARAMS,
+                    param_block_prob=qnn_config.PARAM_BLOCK_PROB,
                 )
                 del champion_copy.fitness.values
                 immigrants.append(champion_copy)
@@ -466,18 +339,33 @@ def main() -> None:
         top_k = train_ranked[:champion_check_k]
         best_val_acc = -1.0
         best_val_ind = None
-        for val_ind in top_k:
-            val_acc, _ = validate_circuit(
-                val_ind,
-                circuit_qubits,
-                X_val_enc,
-                y_val,
-                n_classes,
-                seed_weights=getattr(val_ind, "stored_thetas", {}),
+        if toolbox.parallel_evaluation:
+            validate_fn = functools.partial(
+                validate_circuit,
+                num_qubits=circuit_qubits,
+                X_val=X_val_enc,
+                y_val=y_val,
+                n_classes=n_classes,
             )
-            if val_acc > best_val_acc:
-                best_val_acc = val_acc
-                best_val_ind = val_ind
+            results = toolbox.map(validate_fn, top_k)
+            for val_ind, (val_acc, _) in zip(top_k, results):
+                if val_acc > best_val_acc:
+                    best_val_acc = val_acc
+                    best_val_ind = val_ind
+        else:
+            for val_ind in top_k:
+                val_acc, _ = validate_circuit(
+                    val_ind,
+                    circuit_qubits,
+                    X_val_enc,
+                    y_val,
+                    n_classes,
+                    seed_weights=getattr(val_ind, "stored_thetas", {}),
+                )
+                if val_acc > best_val_acc:
+                    best_val_acc = val_acc
+                    best_val_ind = val_ind
+
         true_val_acc = best_val_acc
         best_individual = best_val_ind or train_ranked[0]
         best_soft_dyn = -best_individual.fitness.values[0]
@@ -523,7 +411,7 @@ def main() -> None:
             champion_thetas = copy.deepcopy(
                 getattr(best_individual, "stored_thetas", {})
             )
-            if APPROACH == "clifford":
+            if qnn_config.APPROACH == "clifford":
                 from algorithms.qnn.utils import update_hof
 
                 for block_gene in best_individual:
@@ -538,7 +426,7 @@ def main() -> None:
             champion_thetas = copy.deepcopy(
                 getattr(best_individual, "stored_thetas", {})
             )
-            if APPROACH == "clifford":
+            if qnn_config.APPROACH == "clifford":
                 from algorithms.qnn.utils import update_hof
 
                 for block_gene in best_individual:
@@ -555,9 +443,10 @@ def main() -> None:
             print(f"[INFO] Early stopping en generación {gen} (paciencia={patience})")
             break
 
-        if stagnant_generations > patience // 5:
+        if stagnant_generations > patience // MUTATION_ADAPT_PATIENCE_DIVISOR:
             current_indpb = min(
-                0.7, base_indpb * (1.0 + 5.0 * stagnant_generations / patience)
+                0.7,
+                base_indpb * (1.0 + MUTATION_ADAPT_SCALE * stagnant_generations / patience),
             )
         else:
             current_indpb = base_indpb
@@ -567,14 +456,15 @@ def main() -> None:
             mut_quantum_circuit,
             num_qubits=circuit_qubits,
             indpb=current_indpb,
-            max_params=NUM_PARAMS,
-            enable_input_params=ENABLE_INPUT_PARAMS,
-            param_block_prob=PARAM_BLOCK_PROB,
+            max_params=qnn_config.NUM_PARAMS,
+            enable_input_params=qnn_config.ENABLE_INPUT_PARAMS,
+            param_block_prob=qnn_config.PARAM_BLOCK_PROB,
         )
 
         if stagnant_generations > patience // 2 and absolute_champion is not None:
             unique_fitness = {
-                tuple(round(v, 3) for v in ind.fitness.values) for ind in population
+                tuple(round(v, DIVERSITY_UNIQUE_FIT_ROUND) for v in ind.fitness.values)
+                for ind in population
             }
             low_diversity = len(unique_fitness) < mu // 4
             near_timeout = stagnant_generations >= patience - patience_window
@@ -595,7 +485,7 @@ def main() -> None:
                 )
                 keeper = toolbox.clone(absolute_champion)
                 new_pop = [keeper]
-                n_mutated = int((mu - 1) * 0.6)
+                n_mutated = int((mu - 1) * RESET_MUTATED_RATIO)
                 n_fresh = (mu - 1) - n_mutated
                 for _ in range(n_mutated):
                     ind = toolbox.clone(absolute_champion)
@@ -603,9 +493,9 @@ def main() -> None:
                         ind,
                         circuit_qubits,
                         current_indpb,
-                        max_params=NUM_PARAMS,
-                        enable_input_params=ENABLE_INPUT_PARAMS,
-                        param_block_prob=PARAM_BLOCK_PROB,
+                        max_params=qnn_config.NUM_PARAMS,
+                        enable_input_params=qnn_config.ENABLE_INPUT_PARAMS,
+                        param_block_prob=qnn_config.PARAM_BLOCK_PROB,
                     )
                     del ind.fitness.values
                     new_pop.append(ind)
@@ -661,19 +551,19 @@ def main() -> None:
     )
 
     timestamp = datetime.now().strftime("%d%m%Y_%H%M%S")
-    output_dir = project_root / "results" / "qnn" / dataset_name / APPROACH
+    output_dir = project_root / "results" / "qnn" / dataset_name / qnn_config.APPROACH
     output_dir.mkdir(parents=True, exist_ok=True)
     output_stem = (
-        f"{dataset_name}_{circuit_qubits}q_{APPROACH}_g{last_gen + 1}_{timestamp}"
+        f"{dataset_name}_{circuit_qubits}q_{qnn_config.APPROACH}_g{last_gen + 1}_{timestamp}"
     )
 
     qc_draw = build_quantum_circuit(
-        absolute_champion, circuit_qubits, MANUAL_INPUT_VALUES, champion_thetas
+        absolute_champion, circuit_qubits, qnn_config.MANUAL_INPUT_VALUES, champion_thetas
     )
     qc_final = build_quantum_circuit(
         absolute_champion,
         circuit_qubits,
-        MANUAL_INPUT_VALUES,
+        qnn_config.MANUAL_INPUT_VALUES,
         champion_thetas,
         measure=True,
     )
@@ -690,10 +580,10 @@ def main() -> None:
             json.dump(architecture, f, indent=4)
 
     genotype_payload = {
-        "approach": APPROACH,
+        "approach": qnn_config.APPROACH,
         "num_qubits": circuit_qubits,
-        "num_params": NUM_PARAMS,
-        "manual_input_values": MANUAL_INPUT_VALUES,
+        "num_params": qnn_config.NUM_PARAMS,
+        "manual_input_values": qnn_config.MANUAL_INPUT_VALUES,
         "weights": champion_thetas,
         "genes": serialize_architecture(absolute_champion),
     }
@@ -711,13 +601,13 @@ def main() -> None:
 
     output_data = {
         "config": {
-            "approach": APPROACH,
-            "config_file": str(CONFIG_PATH),
+            "approach": qnn_config.APPROACH,
+            "config_file": str(qnn_config.CONFIG_PATH),
             "dataset": dataset_name,
             "encoding_mode": encoding_mode,
             "circuit_qubits": circuit_qubits,
             "n_classes": n_classes,
-            "simulator_device": SIMULATOR_DEVICE,
+            "simulator_device": qnn_config.SIMULATOR_DEVICE,
             "training_samples": dataset_info["n_train"],
             "validation_samples": dataset_info["n_val"],
             "test_samples": dataset_info["n_test"],
@@ -772,7 +662,7 @@ def main() -> None:
         depth_champion_best=best_depth_champion,
         train_best=best_train,
         val_best=best_val,
-        approach=APPROACH,
+        approach=qnn_config.APPROACH,
         output_stem=output_stem,
         output_dir=output_dir,
     )
@@ -792,6 +682,15 @@ if __name__ == "__main__":
 
     _approaches = _config.get("approaches", None)
     _datasets = _config.get("qnn", {}).get("datasets_to_run", None)
+
+    if _run_args.dataset == "all":
+        _configs_dir = Path(__file__).parent / "configs"
+        _datasets = sorted([f.stem for f in _configs_dir.glob("*.json")])
+        _run_args.dataset = None
+
+    if _run_args.approach == "all":
+        _approaches = ["clifford", "rotation"]
+        _run_args.approach = None
 
     _explicit_dataset = _run_args.dataset is not None
     _explicit_approach = _run_args.approach is not None

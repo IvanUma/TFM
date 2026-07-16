@@ -1,0 +1,55 @@
+from __future__ import annotations
+
+from typing import List
+
+import numpy as np
+
+CLIFFORD_GATES: List[str] = ["H", "S", "CX"]
+PARAMETRIC_GATES: List[str] = ["RX", "RY", "RZ"]
+
+REPS_MIN: int = 1
+REPS_MAX: int = 2
+
+_BUCKET_EDGES = [-0.67, 0.0, 0.67]
+CLIFFORD_ANGLE_LEVELS = [0.0, np.pi / 2, np.pi, 3 * np.pi / 2]
+
+BLOCK_HOF_REUSE_PROB: float = 0.3
+BLOCK_MIN_GATES: int = 2
+BLOCK_MAX_GATES: int = 6
+
+BLOCK_HOF_MAXLEN: int = 100
+
+SIGMOID_BETA: float = 5.0
+
+READOUT_C: float = 0.5
+READOUT_MAX_ITER: int = 200
+READOUT_CV_SPLITS: int = 3
+
+COBYLA_RHOBEG: float = 1.5
+COBYLA_MIN_MAXITER: int = 50
+COBYLA_MIN_MAXITER_NO_INHERIT: int = 30
+COBYLA_RANDOM_STARTS: int = 4
+COBYLA_MAXITER_FACTOR_DEFAULT: int = 15
+
+WEIGHT_INHERITANCE_NOISE_STD: float = 0.05
+WEIGHT_INHERITANCE_MIN_PROB: float = 0.6
+
+NUMERICAL_EPS: float = 1e-12
+
+PCA_RANDOM_STATE: int = 42
+
+N_IMMIGRANTS_DIVISOR: int = 3
+N_IMMIGRANTS_MIN: int = 4
+CHAMPION_IMMIGRANT_PROB: float = 0.5
+
+MUTATION_ADAPT_PATIENCE_DIVISOR: int = 5
+MUTATION_ADAPT_SCALE: float = 5.0
+
+DIVERSITY_UNIQUE_FIT_ROUND: int = 3
+
+RESET_MUTATED_RATIO: float = 0.6
+
+MUTATE_ACTION_PROB_1: float = 0.34
+MUTATE_ACTION_PROB_2: float = 0.67
+
+CIRCUIT_NORM_THRESHOLD: float = 1e-12

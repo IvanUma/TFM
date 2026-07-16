@@ -1,14 +1,14 @@
 {
     "approach": "rotation",
-    "random_seed": 42,
+    "random_seed": null,
     "qnn": {
         "dataset": "breast_cancer",
         "test_split": 0.2,
         "val_split": 0.35
     },
     "population": {
-        "mu": 60,
-        "lambda": 80
+        "mu": 100,
+        "lambda": 200
     },
     "variation": {
         "crossover_prob": 0.5,
@@ -17,18 +17,18 @@
         "crossover_indpb": 0.5
     },
     "evolution": {
-        "generations": 150,
-        "guided_individual_length_min": 10,
-        "guided_individual_length_factor": 6,
-        "patience": 30,
+        "generations": 200,
+        "guided_individual_length_min": 14,
+        "guided_individual_length_factor": 10,
+        "patience": 40,
         "patience_window": 10,
         "improvement_epsilon": 0.0005,
         "champion_inheritance_prob": 0.6,
         "champion_check_k": 4,
-        "max_champion_resets": 2
+        "max_champion_resets": 3
     },
     "evaluation": {
-        "cobyla_maxiter_factor": 18
+        "cobyla_maxiter_factor": 24
     },
     "encoding": {
         "enable_input_params": true,

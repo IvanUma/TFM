@@ -7,12 +7,10 @@ from typing import Dict, List, Set, Tuple, Union
 from qiskit import QuantumCircuit
 
 from . import qnn_common as common
+from .constants import CLIFFORD_GATES, PARAMETRIC_GATES
 
 QuantumGen = Union[Tuple[str, int], Tuple[str, int, int], Tuple[str, str, int, str, int]]
 EvolutionaryIndividual = List[QuantumGen]
-
-CLIFFORD_GATES: List[str] = ["H", "S", "CX"]
-PARAMETRIC_GATES: List[str] = ["RX", "RY", "RZ"]
 
 
 def generate_random_gate(
