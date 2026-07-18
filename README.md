@@ -89,7 +89,7 @@ u v weight
 
 Nodes are 1-indexed. The header line includes the known optimal cut value. If absent, it is computed via brute force (≤20 nodes) or the networkx `one_exchange` heuristic.
 
-Available instances: 10 nodes (14 files), 14 nodes (10 files), 20 nodes (15 files).
+Available instances: 10 nodes (15 files), 14 nodes (15 files), 20 nodes (15 files).
 
 ### Encoding
 
@@ -190,8 +190,11 @@ Training halts when validation accuracy / approximation ratio does not improve f
 
 ```
 TFM/
+├── __init__.py
 ├── algorithms/
+│   ├── __init__.py
 │   ├── qnn/                          # Classification (QNN)
+│   │   ├── __init__.py
 │   │   ├── config.json               # Default configuration
 │   │   ├── configs/                  # Dataset-specific configs
 │   │   │   ├── iris.json
@@ -210,6 +213,7 @@ TFM/
 │   │   └── timing.py                 # Timing aggregation
 │   │
 │   └── general_max_cut/              # Max-Cut optimization
+│       ├── __init__.py
 │       ├── config.json               # Configuration
 │       ├── main.py                   # Entry point & evolution loop
 │       ├── max_cut_common.py         # Shared utils, GA, instance loading
@@ -219,13 +223,14 @@ TFM/
 │       └── timing.py                 # Timing aggregation
 │
 ├── max_cut_instances/                # Graph instances for Max-Cut
-│   ├── instance_10nodes_*.txt        # 10-node instances (14 files)
-│   ├── instance_14nodes_*.txt        # 14-node instances (10 files)
+│   ├── instance_10nodes_*.txt        # 10-node instances (15 files)
+│   ├── instance_14nodes_*.txt        # 14-node instances (15 files)
 │   └── instance_20nodes_*.txt        # 20-node instances (15 files)
 │
 ├── results/                          # Output directory
-│   ├── qnn/
-│   └── general_max_cut/
+│   ├── qnn/                          # QNN classification results
+│   ├── general_max_cut/              # Max-Cut results (multi-instance)
+│   └── single_instance/              # Legacy single-instance results
 │
 ├── generate_instances.py             # Max-Cut instance generator
 ├── run_max_cut_benchmarks.py         # Batch Max-Cut benchmark runner
@@ -236,7 +241,7 @@ TFM/
 
 ## Output
 
-Each run creates timestamped files in `results/{qnn,general_max_cut}/{dataset_name}/{approach}/`:
+Each run creates timestamped files in `results/{qnn,general_max_cut,single_instance}/{dataset_name}/{approach}/`:
 
 | File | Contents |
 |------|----------|

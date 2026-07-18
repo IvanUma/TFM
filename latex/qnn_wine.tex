@@ -1,0 +1,44 @@
+\begin{table}[htbp]
+\centering
+\begin{tabular}{lccc}
+\toprule
+\textbf{Métrica} & \textbf{Clifford} & \textbf{Rotación} & \textbf{Ratio (Rot./Clif.)} \\
+\midrule
+\multicolumn{4}{l}{\textit{Calidad de la Solución}} \\
+\midrule
+Precisión validación (final) & 0.7800 & 0.8600 & 1.10x \\
+Precisión test (final) & 0.7778 & 0.7222 & 0.93x \\
+Profundidad mejor individuo & 3 & 9 & -- \\
+\midrule
+\multicolumn{4}{l}{\textit{Tiempos de Ejecución (s)}} \\
+\midrule
+Total (simulación pura) & 3.1369 & 100.5650 & 32.06x \\
+Total (reloj) & 50.4226 & 442.8405 & 8.78x \\
+Media / generación (sim.) & 0.0270 & 0.6795 & 25.13x \\
+\bottomrule
+\end{tabular}
+\caption{Comparación Clifford vs. Rotación en QNN.}
+\label{tab:comparison-qnn}
+\end{table}
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{c | cc | cc}
+\toprule
+& \multicolumn{2}{c|}{\textbf{Clifford}} & \multicolumn{2}{c}{\textbf{Rotación}} \\
+\textbf{Generación} & \textbf{Precisión (valid.)} & \textbf{Tiempo Sim. (s)} & \textbf{Precisión (valid.)} & \textbf{Tiempo Sim. (s)} \\
+\midrule
+0 & 0.7000 & 0.0176 & 0.6200 & 0.4564 \\
+15 & 0.7600 & 0.0292 & 0.7800 & 0.4518 \\
+30 & 0.7800 & 0.0380 & 0.7600 & 0.4665 \\
+45 & 0.7600 & 0.0359 & 0.7800 & 0.4836 \\
+60 & 0.7800 & 0.0170 & 0.6600 & 0.9917 \\
+75 & 0.7600 & 0.0326 & 0.7800 & 0.9782 \\
+90 & 0.7600 & 0.0325 & 0.7800 & 0.4968 \\
+105 & 0.7600 & 0.0360 & 0.8600 & 0.5079 \\
+115 & 0.7600 & 0.0324 & 0.7600 & 0.5675 \\
+\bottomrule
+\end{tabular}
+\caption{Evolución en QNN: precisión de validación y tiempo de simulación (muestreado cada 15 generaciones)}
+\label{tab:history-qnn}
+\end{table}

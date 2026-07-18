@@ -1,8 +1,8 @@
 {
     "approach": "clifford",
     "approaches": [
-        "rotation",
-        "clifford"
+        "clifford",
+        "rotation"
     ],
     "population": {
         "mu": 50,

@@ -1,0 +1,45 @@
+\begin{table}[htbp]
+\centering
+\begin{tabular}{lccc}
+\toprule
+\textbf{Métrica} & \textbf{Clifford} & \textbf{Rotación} & \textbf{Ratio (Rot./Clif.)} \\
+\midrule
+\multicolumn{4}{l}{\textit{Calidad de la Solución}} \\
+\midrule
+Approx.\ ratio medio (valid.) & 0.648554 & 0.687979 & 1.06x \\
+Profundidad mejor individuo & 6 & 3 & -- \\
+\midrule
+\multicolumn{4}{l}{\textit{Tiempos de Ejecución (s)}} \\
+\midrule
+Total (simulación pura) & 200.9627 & 424.9769 & 2.11x \\
+Total (reloj) & 7819.8911 & 8617.4986 & 1.10x \\
+Media / generación (sim.) & 1.3398 & 2.8332 & 2.11x \\
+\bottomrule
+\end{tabular}
+\caption{Comparación Clifford vs. Rotación en MaxCut.}
+\label{tab:comparison-maxcut}
+\end{table}
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{c | cc | cc}
+\toprule
+& \multicolumn{2}{c|}{\textbf{Clifford}} & \multicolumn{2}{c}{\textbf{Rotación}} \\
+\textbf{Generación} & \textbf{Approx. Ratio} & \textbf{Tiempo Sim. (s)} & \textbf{Approx. Ratio} & \textbf{Tiempo Sim. (s)} \\
+\midrule
+0 & 0.6377 & 1.1590 & 0.6394 & 4.1479 \\
+15 & 0.6497 & 0.6691 & 0.6660 & 2.9127 \\
+30 & 0.6679 & 0.8611 & 0.6871 & 2.1696 \\
+45 & 0.6878 & 1.0311 & 0.7078 & 2.8491 \\
+60 & 0.7016 & 0.8303 & 0.7115 & 2.5464 \\
+75 & 0.7131 & 1.3255 & 0.7271 & 2.5469 \\
+90 & 0.7288 & 1.4844 & 0.7380 & 2.9614 \\
+105 & 0.7474 & 1.7014 & 0.7510 & 2.9215 \\
+120 & 0.7645 & 1.7533 & 0.7634 & 3.1176 \\
+135 & 0.7770 & 1.6011 & 0.7762 & 3.2100 \\
+149 & 0.7885 & 2.2483 & 0.7918 & 3.3468 \\
+\bottomrule
+\end{tabular}
+\caption{Evolución en MaxCut: calidad de la solución y tiempo de simulación (muestreado cada 15 generaciones)}
+\label{tab:history-maxcut}
+\end{table}

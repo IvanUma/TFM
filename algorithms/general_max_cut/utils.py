@@ -7,9 +7,9 @@ import time
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-import random
 import networkx as nx
 import numpy as np
+from qiskit import QuantumCircuit
 from qiskit_aer import AerSimulator
 from scipy.optimize import minimize
 
@@ -172,7 +172,9 @@ def _qnn_classify(
         return 0
     probs = {}
     for bitstring, count in counts.items():
-        probs[int(bitstring.replace(" ", ""), 2)] = probs.get(int(bitstring.replace(" ", ""), 2), 0) + count
+        probs[int(bitstring.replace(" ", ""), 2)] = (
+            probs.get(int(bitstring.replace(" ", ""), 2), 0) + count
+        )
     best_class = max(range(2**n_classes), key=lambda c: probs.get(c, 0))
     return min(best_class, n_classes - 1)
 
@@ -193,7 +195,9 @@ def _qnn_accuracy(
         state_vector = X_data[i]
         qc = QuantumCircuit(num_qubits, num_qubits)
         qc.initialize(state_vector, range(num_qubits))
-        circuit = build_quantum_circuit(individual, num_qubits, MANUAL_INPUT_VALUES, weight_map, measure=False)
+        circuit = build_quantum_circuit(
+            individual, num_qubits, MANUAL_INPUT_VALUES, weight_map, measure=False
+        )
         qc.compose(circuit, inplace=True)
         qc.measure_all()
         counts = simulator.run(qc, shots=shots).result().get_counts()
@@ -242,7 +246,11 @@ def _build_param_circuit(
             if gen[0] == "PARAM_BLOCK":
                 _, p_type, p_idx, rot_gate, qubit = gen
                 if p_type == "INPUT":
-                    theta = MANUAL_INPUT_VALUES[p_idx % len(MANUAL_INPUT_VALUES)] if MANUAL_INPUT_VALUES else 0.0
+                    theta = (
+                        MANUAL_INPUT_VALUES[p_idx % len(MANUAL_INPUT_VALUES)]
+                        if MANUAL_INPUT_VALUES
+                        else 0.0
+                    )
                 else:
                     theta = param_objs.get(p_idx, 0.0)
                 getattr(qc, rot_gate.lower())(theta, qubit)
@@ -322,7 +330,11 @@ def evaluate_circuit(
             x0 = np.array([inherited.get(i, 0.0) for i in sorted_weight_indices])
         else:
             seed = _WEIGHT_CACHE.get(cache_key)
-            x0 = seed if seed is not None else np.random.uniform(0, 2 * np.pi, size=num_weights)
+            x0 = (
+                seed
+                if seed is not None
+                else np.random.uniform(0, 2 * np.pi, size=num_weights)
+            )
         result = minimize(
             objective,
             x0=x0,
