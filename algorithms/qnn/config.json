@@ -4,6 +4,7 @@
     "qnn": {
         "dataset": "breast_cancer",
         "datasets_to_run": [
+            "iris",
             "wine",
             "breast_cancer"
         ],

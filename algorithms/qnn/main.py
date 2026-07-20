@@ -684,9 +684,35 @@ if __name__ == "__main__":
     _datasets = _config.get("qnn", {}).get("datasets_to_run", None)
 
     if _run_args.dataset == "all":
-        _configs_dir = Path(__file__).parent / "configs"
-        _datasets = sorted([f.stem for f in _configs_dir.glob("*.json")])
-        _run_args.dataset = None
+        _all_configs_dir = Path(__file__).parent / "configs"
+        _all_datasets = sorted([f.stem for f in _all_configs_dir.glob("*.json")])
+        if _run_args.approach == "both" or _run_args.approach == "all":
+            _all_approaches = ["clifford", "rotation"]
+        elif _run_args.approach:
+            _all_approaches = [_run_args.approach]
+        else:
+            _all_approaches = _approaches if _approaches else ["clifford", "rotation"]
+        for _all_ds in _all_datasets:
+            for _all_a in _all_approaches:
+                print(f"\n{'=' * 60}")
+                print(f"  Dataset: {_all_ds} | Approach: {_all_a}")
+                print(f"{'=' * 60}\n")
+                _all_result = subprocess.run(
+                    [
+                        sys.executable,
+                        __file__,
+                        "--internal",
+                        "--dataset",
+                        _all_ds,
+                        "--approach",
+                        _all_a,
+                    ]
+                )
+                if _all_result.returncode != 0:
+                    print(
+                        f"[ERROR] Dataset {_all_ds} / Approach {_all_a} falló (código {_all_result.returncode})"
+                    )
+        sys.exit(0)
 
     if _run_args.approach == "all":
         _approaches = ["clifford", "rotation"]

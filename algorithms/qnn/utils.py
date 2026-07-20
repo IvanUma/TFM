@@ -44,7 +44,11 @@ def _deep_tuple(obj):
         return tuple(_deep_tuple(item) for item in obj)
     if isinstance(obj, tuple):
         return tuple(_deep_tuple(item) for item in obj)
-    return obj
+    try:
+        hash(obj)
+        return obj
+    except TypeError:
+        return str(obj)
 
 
 _ROTATION_SIMPLIFY_PM = PassManager(
@@ -182,11 +186,12 @@ _CLIFFORD_INPUT_CACHE: Dict[Tuple, np.ndarray] = {}
 def _get_clifford_input_matrix(X_data: np.ndarray, num_qubits: int) -> np.ndarray:
     key = (num_qubits, X_data.shape[0])
     if key not in _CLIFFORD_INPUT_CACHE:
-        _CLIFFORD_INPUT_CACHE[key] = np.array([
-            Statevector.from_instruction(
-                _prepare_input_circuit(num_qubits, x)
-            ).data for x in X_data
-        ])
+        _CLIFFORD_INPUT_CACHE[key] = np.array(
+            [
+                Statevector.from_instruction(_prepare_input_circuit(num_qubits, x)).data
+                for x in X_data
+            ]
+        )
     return _CLIFFORD_INPUT_CACHE[key]
 
 
@@ -202,7 +207,9 @@ def _get_rotation_ansatz(
             _, p_type, p_idx, rot_gate, qubit = gen
             if p_type == "INPUT":
                 theta = (
-                    _qnn_config.MANUAL_INPUT_VALUES[p_idx % len(_qnn_config.MANUAL_INPUT_VALUES)]
+                    _qnn_config.MANUAL_INPUT_VALUES[
+                        p_idx % len(_qnn_config.MANUAL_INPUT_VALUES)
+                    ]
                     if _qnn_config.MANUAL_INPUT_VALUES
                     else 0.0
                 )
@@ -277,9 +284,9 @@ def _qnn_metrics(
     )
 
     if _qnn_config.APPROACH == "rotation":
-        input_state_matrix = np.array([
-            _get_input_statevector(num_qubits, tuple(x)) for x in X_data
-        ])
+        input_state_matrix = np.array(
+            [_get_input_statevector(num_qubits, tuple(x)) for x in X_data]
+        )
     else:
         input_state_matrix = _get_clifford_input_matrix(X_data, num_qubits)
     sign_matrix = _get_sign_matrix(num_qubits)
@@ -332,10 +339,12 @@ def evaluate_circuit(
     sim_start = time.perf_counter()
 
     if _qnn_config.APPROACH == "rotation" and num_weights > 0:
-        input_state_matrix = np.array([
-            _get_input_statevector(num_qubits, tuple(features))
-            for features, _ in instances
-        ])
+        input_state_matrix = np.array(
+            [
+                _get_input_statevector(num_qubits, tuple(features))
+                for features, _ in instances
+            ]
+        )
         labels_arr = np.array([label for _, label in instances])
         sign_matrix = _get_sign_matrix(num_qubits)
 
@@ -356,7 +365,9 @@ def evaluate_circuit(
                 loss -= np.log(class_probs[label] + NUMERICAL_EPS)
             return loss / len(instances) if instances else 0.0
 
-        cobyla_factor = _qnn_config._CONFIG.get("evaluation", {}).get("cobyla_maxiter_factor", COBYLA_MAXITER_FACTOR_DEFAULT)
+        cobyla_factor = _qnn_config._CONFIG.get("evaluation", {}).get(
+            "cobyla_maxiter_factor", COBYLA_MAXITER_FACTOR_DEFAULT
+        )
         maxiter = max(
             COBYLA_MIN_MAXITER,
             num_weights * cobyla_factor,
@@ -409,11 +420,17 @@ def evaluate_circuit(
 
     depth = _effective_depth(
         _qnn_config.build_quantum_circuit(
-            individual, num_qubits, _qnn_config.MANUAL_INPUT_VALUES, best_weights, measure=False
+            individual,
+            num_qubits,
+            _qnn_config.MANUAL_INPUT_VALUES,
+            best_weights,
+            measure=False,
         )
     )
 
-    depth_power = float(_qnn_config._CONFIG.get("evolution", {}).get("depth_power", 1.2))
+    depth_power = float(
+        _qnn_config._CONFIG.get("evolution", {}).get("depth_power", 1.2)
+    )
     depth_obj = float(depth) ** depth_power
 
     readout_data = getattr(individual, "_readout_clf", None)

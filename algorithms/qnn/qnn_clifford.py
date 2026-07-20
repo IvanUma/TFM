@@ -1,17 +1,67 @@
 from __future__ import annotations
 
+import functools
+import math
+import operator
 import random
-from typing import List, Set, Tuple, Union
+from typing import Callable, Dict, List, Set, Tuple, Union
 
+from deap import gp
 from qiskit import QuantumCircuit
 
 from . import qnn_common as common
-from .constants import CLIFFORD_GATES, REPS_MIN, REPS_MAX, BLOCK_HOF_REUSE_PROB, BLOCK_MIN_GATES, BLOCK_MAX_GATES, MUTATE_ACTION_PROB_1, MUTATE_ACTION_PROB_2
+from .constants import (
+    CLIFFORD_GATES,
+    REPS_MIN,
+    REPS_MAX,
+    BLOCK_HOF_REUSE_PROB,
+    BLOCK_MIN_GATES,
+    BLOCK_MAX_GATES,
+    MUTATE_ACTION_PROB_1,
+    MUTATE_ACTION_PROB_2,
+)
 
 BLOCK_HOF: List[List[Tuple]] = []
 
+pset = gp.PrimitiveSet("MAIN", 2)
+pset.renameArguments(ARG0="in_val", ARG1="w_val")
+
+pset.addPrimitive(operator.add, 2)
+pset.addPrimitive(operator.sub, 2)
+pset.addPrimitive(operator.mul, 2)
+
+
+def safe_mod(a, b):
+    return a % b if abs(b) > 0.001 else a
+
+
+pset.addPrimitive(safe_mod, 2)
+pset.addPrimitive(math.sin, 1)
+pset.addPrimitive(math.cos, 1)
+
+
+def generate_rand_const():
+    return random.randint(-3, 3)
+
+
+pset.addEphemeralConstant("rand_const_qnn_clifford", generate_rand_const)
+
+_COMPILED_TREE_CACHE: Dict[str, Callable] = {}
+
+
+def get_compiled_repetition_function(tree: gp.PrimitiveTree) -> Callable:
+    key = str(tree)
+    compiled = _COMPILED_TREE_CACHE.get(key)
+    if compiled is None:
+        compiled = gp.compile(tree, pset)
+        _COMPILED_TREE_CACHE[key] = compiled
+    return compiled
+
+
 QuantumGen = Union[
-    Tuple[str, int], Tuple[str, int, int], Tuple[str, int, List[Tuple], int]
+    Tuple[str, int],
+    Tuple[str, int, int],
+    Tuple[str, int, List[Tuple], gp.PrimitiveTree],
 ]
 EvolutionaryIndividual = List[QuantumGen]
 
@@ -33,17 +83,13 @@ def generate_random_block(num_qubits: int) -> List[Tuple]:
 
 
 def generate_random_param_block(
-    num_qubits: int, param_idx: int, reps: int | None = None
+    num_qubits: int, param_idx: int, tree: gp.PrimitiveTree | None = None
 ) -> QuantumGen:
     block_gates = generate_random_block(num_qubits)
-    if reps is None:
-        reps = random.randint(REPS_MIN, REPS_MAX)
-    return ("PARAM_BLOCK", param_idx, block_gates, reps)
-
-
-def mutate_reps(reps: int) -> int:
-    new_reps = reps + random.choice([-1, 1])
-    return max(REPS_MIN, min(REPS_MAX, new_reps))
+    if tree is None:
+        expr = gp.genHalfAndHalf(pset, min_=1, max_=4)
+        tree = gp.PrimitiveTree(expr)
+    return ("PARAM_BLOCK", param_idx, block_gates, tree)
 
 
 def mutate_block_structure(block: List[Tuple], num_qubits: int) -> List[Tuple]:
@@ -102,20 +148,25 @@ def mut_quantum_circuit(
         if random.random() < indpb:
             gen = individual[i]
             if gen[0] == "PARAM_BLOCK":
-                param_idx, block_gates, reps = gen[1], gen[2], gen[3]
+                param_idx, block_gates, tree = gen[1], gen[2], gen[3]
                 action_roll = random.random()
                 if action_roll < MUTATE_ACTION_PROB_1:
                     new_block = mutate_block_structure(list(block_gates), num_qubits)
-                    individual[i] = ("PARAM_BLOCK", param_idx, new_block, reps)
+                    individual[i] = ("PARAM_BLOCK", param_idx, new_block, tree)
                 elif action_roll < MUTATE_ACTION_PROB_2:
                     new_block = generate_random_block(num_qubits)
-                    individual[i] = ("PARAM_BLOCK", param_idx, new_block, reps)
+                    individual[i] = ("PARAM_BLOCK", param_idx, new_block, tree)
                 else:
+                    new_tree = gp.mutUniform(
+                        tree,
+                        expr=functools.partial(gp.genHalfAndHalf, min_=1, max_=2),
+                        pset=pset,
+                    )[0]
                     individual[i] = (
                         "PARAM_BLOCK",
                         param_idx,
                         block_gates,
-                        mutate_reps(reps),
+                        gp.PrimitiveTree(new_tree),
                     )
                 i += 1
                 continue
@@ -149,13 +200,13 @@ def describe_blocks(individual: EvolutionaryIndividual) -> List[dict]:
     blocks = []
     for position, gen in enumerate(individual):
         if gen[0] == "PARAM_BLOCK":
-            param_idx, block_gates, reps = gen[1], gen[2], gen[3]
+            param_idx, block_gates, tree = gen[1], gen[2], gen[3]
             blocks.append(
                 {
                     "position": position,
                     "param_idx": param_idx,
                     "gate_count": len(block_gates),
-                    "reps": reps,
+                    "repetition_expression": str(tree),
                     "gates": [list(g) for g in block_gates],
                 }
             )
@@ -166,13 +217,13 @@ def serialize_individual(individual: EvolutionaryIndividual) -> List[dict]:
     serialized = []
     for gen in individual:
         if gen[0] == "PARAM_BLOCK":
-            param_idx, block_gates, reps = gen[1], gen[2], gen[3]
+            param_idx, block_gates, tree = gen[1], gen[2], gen[3]
             serialized.append(
                 {
                     "type": "PARAM_BLOCK",
                     "param_idx": param_idx,
                     "block_gates": [list(g) for g in block_gates],
-                    "reps": reps,
+                    "tree": str(tree),
                 }
             )
         else:
@@ -185,8 +236,8 @@ def deserialize_individual(data: List[dict]) -> EvolutionaryIndividual:
     for item in data:
         if item["type"] == "PARAM_BLOCK":
             block_gates = [tuple(g) for g in item["block_gates"]]
-            reps = item.get("reps", 1)
-            individual.append(("PARAM_BLOCK", item["param_idx"], block_gates, reps))
+            tree = gp.PrimitiveTree.from_string(item["tree"], pset)
+            individual.append(("PARAM_BLOCK", item["param_idx"], block_gates, tree))
         else:
             individual.append(tuple(item["gene"]))
     return individual
@@ -202,7 +253,20 @@ def build_quantum_circuit(
     qc = QuantumCircuit(num_qubits)
     for gen in individual:
         if gen[0] == "PARAM_BLOCK":
-            param_idx, block_gates, reps = gen[1], gen[2], gen[3]
+            param_idx, block_gates, tree = gen[1], gen[2], gen[3]
+            func = get_compiled_repetition_function(tree)
+
+            in_val = (
+                input_values[param_idx % len(input_values)] if input_values else 0.0
+            )
+            w_val = weight_values.get(param_idx, 0.0)
+
+            try:
+                raw = func(in_val, w_val)
+                reps = max(REPS_MIN, min(int(abs(raw)), REPS_MAX))
+            except Exception:
+                reps = REPS_MIN
+
             for _ in range(reps):
                 for b_gate in block_gates:
                     if b_gate[0] == "H":
