@@ -272,8 +272,10 @@ def _build_param_circuit(
 
     from qiskit import QuantumCircuit as QCircuit
 
-    quantized = tuple(round(weight_map.get(i, 0.0), 2) for i in sorted_weight_indices)
-    key = _individual_cache_key(individual) + f"_{num_qubits}_" + str(quantized)
+    reps_tuple = tuple(
+        q_strategy.compute_reps(individual, weight_map, sorted_weight_indices, MANUAL_INPUT_VALUES)
+    )
+    key = _individual_cache_key(individual) + f"_{num_qubits}_" + str(reps_tuple)
     cached = _CIRCUIT_CACHE.get(key)
     if cached is not None:
         return cached

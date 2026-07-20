@@ -49,6 +49,32 @@ def get_compiled_repetition_function(tree: gp.PrimitiveTree) -> Callable:
     return compiled
 
 
+def compute_reps(
+    individual: EvolutionaryIndividual,
+    weight_map: Dict[int, float],
+    sorted_weight_indices: List[int],
+    input_values: List[float] = None,
+) -> List[int]:
+    if input_values is None:
+        input_values = [0.0]
+    reps_list = []
+    for gen in individual:
+        if gen[0] == "PARAM_BLOCK":
+            param_idx, _, tree = gen[1], gen[2], gen[3]
+            func = get_compiled_repetition_function(tree)
+            in_val = (
+                input_values[param_idx % len(input_values)] if input_values else 0.0
+            )
+            w_val = weight_map.get(param_idx, 0.0)
+            try:
+                raw = func(in_val, w_val)
+                reps = max(1, min(int(abs(raw)), 8))
+            except Exception:
+                reps = 1
+            reps_list.append(reps)
+    return reps_list
+
+
 QuantumGen = Union[
     Tuple[str, int],
     Tuple[str, int, int],
@@ -303,14 +329,16 @@ def build_quantum_circuit(
             except Exception:
                 reps = 1
 
+            block_qc = QuantumCircuit(num_qubits)
+            for b_gate in block_gates:
+                if b_gate[0] == "H":
+                    block_qc.h(b_gate[1])
+                elif b_gate[0] == "S":
+                    block_qc.s(b_gate[1])
+                elif b_gate[0] == "CX":
+                    block_qc.cx(b_gate[1], b_gate[2])
             for _ in range(reps):
-                for b_gate in block_gates:
-                    if b_gate[0] == "H":
-                        qc.h(b_gate[1])
-                    elif b_gate[0] == "S":
-                        qc.s(b_gate[1])
-                    elif b_gate[0] == "CX":
-                        qc.cx(b_gate[1], b_gate[2])
+                qc.compose(block_qc, inplace=True)
         else:
             if gen[0] == "H":
                 qc.h(gen[1])
