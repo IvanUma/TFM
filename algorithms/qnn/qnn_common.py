@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import logging
 import random
-from typing import Callable, Dict, List, Tuple, Union
+from typing import Callable, List, Tuple, Union
 
 from qiskit import QuantumCircuit
 from qiskit.transpiler import PassManager
 from qiskit.transpiler.passes import CommutativeCancellation, Optimize1qGatesSimpleCommutation
 
 logger = logging.getLogger(__name__)
+
+_SIMPLIFY_PASS_MANAGER = PassManager(
+    [CommutativeCancellation(), Optimize1qGatesSimpleCommutation()]
+)
 
 QuantumGen = Union[Tuple[str, int], Tuple[str, int, int]]
 EvolutionaryIndividual = List[QuantumGen]
@@ -29,10 +33,11 @@ def apply_block(qc: QuantumCircuit, block: EvolutionaryIndividual) -> None:
 
 
 def simplify_gate_sequence(gates: List[QuantumGen], num_qubits: int) -> List[QuantumGen]:
+    if len(gates) <= 2:
+        return list(gates)
     qc = QuantumCircuit(num_qubits)
     apply_block(qc, gates)
-    pm = PassManager([CommutativeCancellation(), Optimize1qGatesSimpleCommutation()])
-    qc = pm.run(qc)
+    qc = _SIMPLIFY_PASS_MANAGER.run(qc)
     optimized: List[QuantumGen] = []
     for inst in qc.data:
         name = inst.operation.name.upper()

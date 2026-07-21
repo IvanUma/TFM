@@ -61,8 +61,9 @@ generate_heuristic_individual = common.generate_heuristic_individual
 load_external_maxcut_instance = common.load_external_maxcut_instance
 cx_quantum_circuit = common.cx_quantum_circuit
 max_cut_fitness = common.max_cut_fitness
+max_cut_fitness_from_arrays = common.max_cut_fitness_from_arrays
 
-InstanceData = Tuple[nx.Graph, float]
+InstanceData = Tuple[Tuple[np.ndarray, np.ndarray, np.ndarray], int, float]
 
 _execution_cfg = CONFIG.get("execution", {})
 _STABILIZER_THREADS: int = _execution_cfg.get("stabilizer_max_parallel_threads", 1)
@@ -264,7 +265,7 @@ def _build_param_circuit(
 
         qc.measure_all()
         _CIRCUIT_CACHE[key] = (qc, param_indices, param_objs)
-        if len(_CIRCUIT_CACHE) > 200:
+        if len(_CIRCUIT_CACHE) > 500:
             _CIRCUIT_CACHE.pop(next(iter(_CIRCUIT_CACHE)))
 
         assignments = {param_objs[i]: weight_map.get(i, 0.0) for i in param_indices}
@@ -273,7 +274,9 @@ def _build_param_circuit(
     from qiskit import QuantumCircuit as QCircuit
 
     reps_tuple = tuple(
-        q_strategy.compute_reps(individual, weight_map, sorted_weight_indices, MANUAL_INPUT_VALUES)
+        q_strategy.compute_reps(
+            individual, weight_map, sorted_weight_indices, MANUAL_INPUT_VALUES
+        )
     )
     key = _individual_cache_key(individual) + f"_{num_qubits}_" + str(reps_tuple)
     cached = _CIRCUIT_CACHE.get(key)
@@ -284,7 +287,7 @@ def _build_param_circuit(
         individual, num_qubits, MANUAL_INPUT_VALUES, weight_map, measure=True
     )
     _CIRCUIT_CACHE[key] = qc
-    if len(_CIRCUIT_CACHE) > 500:
+    if len(_CIRCUIT_CACHE) > 1000:
         _CIRCUIT_CACHE.pop(next(iter(_CIRCUIT_CACHE)))
     return qc
 
@@ -314,8 +317,10 @@ def evaluate_circuit(
         simulation_seconds += time.perf_counter() - sim_start
 
         ratios = []
-        for graph_instance, optimal_cut in instances:
-            cvar_cut = max_cut_fitness(counts, graph_instance, alpha=gamma)
+        for edge_arrays, num_nodes, optimal_cut in instances:
+            cvar_cut = common.max_cut_fitness_from_arrays(
+                counts, edge_arrays, num_nodes, alpha=gamma
+            )
             ratios.append(cvar_cut / optimal_cut if optimal_cut > 0 else 0.0)
 
         mean_ar = sum(ratios) / len(ratios)
@@ -325,7 +330,7 @@ def evaluate_circuit(
         return -mean_ar
 
     if num_weights > 0:
-        maxiter = max(50, num_weights * 15)
+        maxiter = max(15, num_weights * 3)
         cache_key = _individual_cache_key(individual) + f"_{shots}_{gamma}"
         inherited = getattr(individual, "_seed_weights", None)
         if inherited is not None:
@@ -341,7 +346,7 @@ def evaluate_circuit(
             objective,
             x0=x0,
             method="COBYLA",
-            options={"maxiter": maxiter, "rhobeg": 0.5},
+            options={"maxiter": maxiter, "rhobeg": 0.3},
         )
         best_avg_ratio = -result.fun
         best_weights = dict(zip(sorted_weight_indices, (float(w) for w in result.x)))
@@ -389,8 +394,10 @@ def validate_circuit(
         counts = simulator.run(qc, shots=shots).result().get_counts()
 
         ratios = []
-        for _, graph, optimal_cut in validation_instances:
-            cut = max_cut_fitness(counts, graph, alpha=1.0)
+        for _, edge_arrays, num_nodes, optimal_cut in validation_instances:
+            cut = common.max_cut_fitness_from_arrays(
+                counts, edge_arrays, num_nodes, alpha=1.0
+            )
             ratios.append(cut / optimal_cut if optimal_cut > 0 else 0.0)
 
         return -sum(ratios) / len(ratios)
@@ -402,12 +409,12 @@ def validate_circuit(
             rng = np.random.RandomState(42)
             x0 = rng.uniform(0, 2 * np.pi, size=num_weights)
 
-        maxiter = max(50, num_weights * 10)
+        maxiter = max(10, num_weights * 5)
         result = minimize(
             objective,
             x0=x0,
             method="COBYLA",
-            options={"maxiter": maxiter},
+            options={"maxiter": maxiter, "rhobeg": 0.3},
         )
         return -result.fun
     else:

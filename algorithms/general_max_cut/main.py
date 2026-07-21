@@ -20,6 +20,7 @@ from deap import algorithms, base, creator, tools
 from qiskit import qpy
 from qiskit_aer import AerSimulator
 
+import max_cut_common as common
 from timing import aggregate_simulation_seconds
 
 matplotlib.use("Agg")
@@ -167,7 +168,6 @@ def main() -> None:
         generate_heuristic_individual,
         generate_guided_individual,
         load_external_maxcut_instance,
-        max_cut_fitness,
         mut_quantum_circuit,
         serialize_architecture,
         update_hof,
@@ -201,8 +201,14 @@ def main() -> None:
 
     circuit_qubits = MAX_QUBITS
     template_graph_instance = all_instances[0][1]
-    training_data = [(graph, opt) for _, graph, opt in training_instances]
-    validation_data = validation_instances
+    training_data = [
+        (common.precompute_edge_arrays(graph), graph.number_of_nodes(), opt)
+        for _, graph, opt in training_instances
+    ]
+    validation_data = [
+        (name, common.precompute_edge_arrays(graph), graph.number_of_nodes(), opt)
+        for name, graph, opt in validation_instances
+    ]
     run_label = instances_dir.name
     filename = instances_dir.name
 
@@ -212,7 +218,10 @@ def main() -> None:
     gamma_config = CONFIG["gamma_schedule"]
     evaluation_config = CONFIG["evaluation"]
     execution_config = CONFIG.get("execution", {})
-    training_data_static = [(graph, opt) for _, graph, opt in training_instances]
+    training_data_static = [
+        (common.precompute_edge_arrays(graph), graph.number_of_nodes(), opt)
+        for _, graph, opt in training_instances
+    ]
     base_indpb = variation_config["mutation_indpb"]
     current_indpb = base_indpb
 
@@ -458,7 +467,7 @@ def main() -> None:
         pool.join()
 
     def training_instances_as_named(data):
-        return [(f"training_{i}", g, o) for i, (g, o) in enumerate(data)]
+        return [(f"training_{i}", g, n, o) for i, (g, n, o) in enumerate(data)]
 
     evaluation_set = validation_data
     if evaluation_set is None or len(evaluation_set) == 0:
@@ -485,8 +494,8 @@ def main() -> None:
     )
 
     per_instance = []
-    for name, graph, optimal_cut in evaluation_set:
-        cut = max_cut_fitness(best_counts, graph, alpha=1.0)
+    for name, edge_arrays, num_nodes, optimal_cut in evaluation_set:
+        cut = common.max_cut_fitness_from_arrays(best_counts, edge_arrays, num_nodes, alpha=1.0)
         ar = cut / optimal_cut if optimal_cut > 0 else 0.0
         per_instance.append({"instance": name, "approx_ratio": float(ar)})
 

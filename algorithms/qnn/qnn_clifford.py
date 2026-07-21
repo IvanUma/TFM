@@ -47,6 +47,23 @@ def generate_rand_const():
 pset.addEphemeralConstant("rand_const_qnn_clifford", generate_rand_const)
 
 _COMPILED_TREE_CACHE: Dict[str, Callable] = {}
+_BLOCK_CIRCUIT_CACHE: Dict[Tuple, QuantumCircuit] = {}
+
+
+def _get_block_circuit(block_gates: tuple, num_qubits: int) -> QuantumCircuit:
+    key = (block_gates, num_qubits)
+    qc = _BLOCK_CIRCUIT_CACHE.get(key)
+    if qc is None:
+        qc = QuantumCircuit(num_qubits)
+        for b_gate in block_gates:
+            if b_gate[0] == "H":
+                qc.h(b_gate[1])
+            elif b_gate[0] == "S":
+                qc.s(b_gate[1])
+            elif b_gate[0] == "CX":
+                qc.cx(b_gate[1], b_gate[2])
+        _BLOCK_CIRCUIT_CACHE[key] = qc
+    return qc
 
 
 def get_compiled_repetition_function(tree: gp.PrimitiveTree) -> Callable:
@@ -259,7 +276,7 @@ def build_quantum_circuit(
             in_val = (
                 input_values[param_idx % len(input_values)] if input_values else 0.0
             )
-            w_val = weight_values.get(param_idx, 0.0)
+            w_val = round(weight_values.get(param_idx, 0.0), 2)
 
             try:
                 raw = func(in_val, w_val)
@@ -267,14 +284,9 @@ def build_quantum_circuit(
             except Exception:
                 reps = REPS_MIN
 
+            block_qc = _get_block_circuit(tuple(block_gates), num_qubits)
             for _ in range(reps):
-                for b_gate in block_gates:
-                    if b_gate[0] == "H":
-                        qc.h(b_gate[1])
-                    elif b_gate[0] == "S":
-                        qc.s(b_gate[1])
-                    elif b_gate[0] == "CX":
-                        qc.cx(b_gate[1], b_gate[2])
+                qc.compose(block_qc, inplace=True)
         else:
             if gen[0] == "H":
                 qc.h(gen[1])

@@ -54,19 +54,37 @@ def generate_maxcut_file(
 
 if __name__ == "__main__":
     instances_dir = Path(__file__).parent / "max_cut_instances"
+    instances_dir.mkdir(parents=True, exist_ok=True)
 
-    qubit_groups = [(12, 0.35)]
+    configs = [
+        (10, 0.45, 0),
+        (15, 0.35, 5),
+        (20, 0.30, 0),
+        (25, 0.25, 5),
+        (30, 0.20, 5),
+    ]
 
-    instances_per_group = 15
+    for nodes, p, count in configs:
+        existing = len(list(instances_dir.glob(f"instance_{nodes}nodes_*.txt")))
+        if count == 0:
+            print(f"[SKIP] {nodes} nodes: {existing} instances already exist")
+            continue
 
-    for nodes, p in qubit_groups:
-        for _ in range(instances_per_group):
-            random_id = random.randint(1000, 9999)
-            filename = f"instance_{nodes}nodes_{random_id}.txt"
-
+        needed = count
+        for _ in range(needed):
+            while True:
+                random_id = random.randint(1000, 9999)
+                filename = f"instance_{nodes}nodes_{random_id}.txt"
+                if not (instances_dir / filename).exists():
+                    break
             generate_maxcut_file(
                 num_nodes=nodes,
                 edge_probability=p,
                 output_path=instances_dir / filename,
                 weight_range=(1, 5),
             )
+
+    print("\n=== Resumen ===")
+    for nodes, p, _ in configs:
+        count = len(list(instances_dir.glob(f"instance_{nodes}nodes_*.txt")))
+        print(f"  {nodes} nodos: {count} instancias")

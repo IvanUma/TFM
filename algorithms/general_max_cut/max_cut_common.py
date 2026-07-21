@@ -5,6 +5,7 @@ import random
 from typing import Callable, Dict, List, Tuple, Union
 
 import networkx as nx
+import numpy as np
 from qiskit import QuantumCircuit
 from qiskit.transpiler import PassManager
 from qiskit.transpiler.passes import (
@@ -13,6 +14,10 @@ from qiskit.transpiler.passes import (
 )
 
 logger = logging.getLogger(__name__)
+
+_SIMPLIFY_PASS_MANAGER = PassManager(
+    [CommutativeCancellation(), Optimize1qGatesSimpleCommutation()]
+)
 
 QuantumGen = Union[
     Tuple[str, int],
@@ -94,14 +99,49 @@ def load_external_maxcut_instance(file_path: str) -> Tuple[nx.Graph, int, float]
     return graph_instance, num_nodes, optimal_cut
 
 
-def _bitstring_cut_value(bitstring: str, graph_instance: nx.Graph) -> float:
-    num_nodes = graph_instance.number_of_nodes()
-    bits = bitstring.replace(" ", "").zfill(num_nodes)[::-1]
-    cut = 0.0
-    for u, v, data in graph_instance.edges(data=True):
-        if bits[u] != bits[v]:
-            cut += data.get("weight", 1.0)
-    return cut
+def precompute_edge_arrays(graph_instance: nx.Graph) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    edges = list(graph_instance.edges(data=True))
+    u = np.array([e[0] for e in edges], dtype=np.int64)
+    v = np.array([e[1] for e in edges], dtype=np.int64)
+    w = np.array([e[2].get("weight", 1.0) for e in edges], dtype=np.float64)
+    return u, v, w
+
+
+def max_cut_fitness_from_arrays(
+    weights: Dict[str, float],
+    edge_arrays: Tuple[np.ndarray, np.ndarray, np.ndarray],
+    num_nodes: int,
+    alpha: float = 1.0,
+) -> float:
+    u, v, w = edge_arrays
+    bitstrings = list(weights.keys())
+    if not bitstrings:
+        return 0.0
+
+    counts_arr = np.array([weights[b] for b in bitstrings])
+
+    bits = np.array([
+        [int(c) for c in bs.replace(" ", "").zfill(num_nodes)[::-1]]
+        for bs in bitstrings
+    ])
+
+    cut_values = (bits[:, u] != bits[:, v]) @ w
+
+    order = np.argsort(-cut_values)
+    cut_values = cut_values[order]
+    counts_arr = counts_arr[order]
+
+    total = float(counts_arr.sum())
+    if total == 0:
+        return 0.0
+
+    target = min(max(alpha, 1e-6), 1.0) * total
+
+    cum = np.cumsum(counts_arr)
+    take = np.minimum(counts_arr, np.maximum(0.0, target - (cum - counts_arr)))
+    accumulated = float(take.sum())
+    weighted = float((cut_values * take).sum())
+    return weighted / accumulated if accumulated > 0 else 0.0
 
 
 def max_cut_fitness(
@@ -109,29 +149,12 @@ def max_cut_fitness(
     graph_instance: nx.Graph,
     alpha: float = 1.0,
 ) -> float:
-    total_weight = sum(weights.values())
-    if total_weight == 0:
-        return 0.0
-
-    alpha = min(max(alpha, 1e-6), 1.0)
-    target_mass = alpha * total_weight
-
-    outcomes = sorted(
-        ((_bitstring_cut_value(bs, graph_instance), w) for bs, w in weights.items()),
-        key=lambda item: item[0],
-        reverse=True,
+    return max_cut_fitness_from_arrays(
+        weights,
+        precompute_edge_arrays(graph_instance),
+        graph_instance.number_of_nodes(),
+        alpha,
     )
-
-    accumulated = 0.0
-    weighted_sum = 0.0
-    for cut_value, w in outcomes:
-        take = min(w, target_mass - accumulated)
-        if take <= 0:
-            break
-        weighted_sum += cut_value * take
-        accumulated += take
-
-    return weighted_sum / accumulated if accumulated > 0 else 0.0
 
 
 def enumerate_qubit_pairs(max_qubits: int) -> List[Tuple[int, int]]:
@@ -219,11 +242,13 @@ def simplify_gate_sequence(
     gates: List[QuantumGen],
     num_qubits: int,
 ) -> List[QuantumGen]:
+    if len(gates) <= 2:
+        return list(gates)
+
     qc = QuantumCircuit(num_qubits)
     apply_block(qc, gates)
 
-    pm = PassManager([CommutativeCancellation(), Optimize1qGatesSimpleCommutation()])
-    qc = pm.run(qc)
+    qc = _SIMPLIFY_PASS_MANAGER.run(qc)
 
     optimized: List[QuantumGen] = []
     for inst in qc.data:
